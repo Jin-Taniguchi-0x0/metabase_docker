@@ -1,0 +1,51 @@
+services:
+  metabase:
+    platform: linux/x86_64
+    image: metabase/metabase:latest
+    container_name: metabase
+    hostname: metabase
+    volumes:
+      # - /dev/urandom:/dev/random:ro
+      - metabase:/metabase.db:cached
+    ports:
+      - 3000:3000
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabase_db
+      MB_DB_PORT: 5432
+      MB_DB_USER: root
+      MB_DB_PASS: root
+      MB_DB_HOST: postgres
+      # USER, HOSTを変更した時はMB_DB_CONNECTION_URも変更すること
+      MB_DB_CONNECTION_UR: postgresql://<host>:5432/metabase?user=root&password=root 
+    networks:
+      - metanet1
+    healthcheck:
+      test: curl --fail -I http://localhost:3000/api/health || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 5
+  postgres:
+    image: postgres:latest
+    container_name: postgres
+    hostname: postgres
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_DB: metabase_db
+      POSTGRES_PASSWORD: root
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    networks:
+      - metanet1
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+volumes:
+  postgres:
+  metabase:
+
+networks:
+  metanet1:
+    driver: bridge
