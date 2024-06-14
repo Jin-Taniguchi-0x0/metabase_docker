@@ -5,7 +5,6 @@ services:
     container_name: metabase
     hostname: metabase
     volumes:
-      # - /dev/urandom:/dev/random:ro
       - metabase:/metabase.db:cached
     ports:
       - 3000:3000
@@ -16,8 +15,7 @@ services:
       MB_DB_USER: root
       MB_DB_PASS: root
       MB_DB_HOST: postgres
-      # USER, HOSTを変更した時はMB_DB_CONNECTION_URも変更すること
-      MB_DB_CONNECTION_UR: postgresql://<host>:5432/metabase?user=root&password=root 
+      MB_DB_CONNECTION_UR: postgresql://postgres:5432/metabase?user=root&password=root
     networks:
       - metanet1
     healthcheck:
@@ -38,7 +36,6 @@ services:
     networks:
       - metanet1
     volumes:
-    #/var/lib/postgresql/dataは、metabase_dbでいいのでは？どうなんだろう
       - postgres:/var/lib/postgresql/data
     build:
       context: ./postgres
@@ -54,8 +51,7 @@ services:
       - metabase
     networks:
       - metanet1
-    environment:
-      METABASE_URL: http://metabase:3000
+    entrypoint: ["sh", "-c", "while ! nc -z metabase 3000; do sleep 1; done; python app.py"]
 
 volumes:
   postgres:

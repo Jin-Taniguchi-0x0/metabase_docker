@@ -6,7 +6,8 @@ COPY requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Add curl installation
-RUN apt-get update && apt-get install -y curl
+RUN apt-get update && apt-get install -y curl && apt-get install sudo
+RUN apt-get install -y netcat-openbsd
 
 COPY . .
 
