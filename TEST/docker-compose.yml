@@ -1,0 +1,70 @@
+services:
+  pgsql_db:
+    image: postgres:${POSTGRES_VERSION}
+    container_name: ${CONTAINER_NAME}
+    hostname: ${HOSTNAME}
+    ports:
+      - "5432:5432"
+    restart: always
+    environment:
+      - POSTGRES_USER=${USER_NAME}
+      - POSTGRES_PASSWORD=${USER_PASS}
+      - POSTGRES_DB=${DB_NAME}
+    networks:
+      - metanet1
+    volumes:
+      # - postgres:/var/lib/postgresql/data
+      - ./postgres:/docker-entrypoint-initdb.d 
+
+  metabase:
+    platform: linux/x86_64
+    image: metabase/metabase
+    container_name: metabase
+    hostname: metabase
+    ports:
+      - 3000:3000
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: ${DB_NAME}
+      MB_DB_PORT: 5432
+      MB_DB_USER: ${USER_NAME}
+      MB_DB_PASS: ${USER_PASS}
+      MB_DB_HOST: pgsql_db
+      MB_DB_CONNECTION_URI: postgresql://${USER_NAME}:${USER_PASS}@pgsql_db:5432/${DB_NAME}
+    networks:
+      - metanet1
+    healthcheck:
+      test: curl --fail -I http://localhost:3000/api/health || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 6g
+
+  python-app:
+    build:
+      context: ./python-app
+      dockerfile: Dockerfile
+    container_name: python-app
+    hostname: python-app
+    depends_on:
+      - metabase
+    networks:
+      - metanet1
+    entrypoint: ["sh", "-c", "while ! nc -z metabase 3000; do sleep 1; done; streamlit run app.py --server.port 8080"]
+    ports:
+      - 8080:8080
+    healthcheck:
+      test: curl --fail -I http://localhost:8080 || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres:
+
+networks:
+  metanet1:
+    driver: bridge
