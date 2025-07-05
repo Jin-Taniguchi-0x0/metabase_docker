@@ -1,0 +1,12 @@
+identifer,view_name
+area,visual-areaChart
+bar,visual-barChart
+donut,visual-donutChart
+funnel,-
+gauge,-
+line,visual-lineChart
+pie,visual-pieChart
+pivot-table,visual-pivotTable
+map,visual-map
+sunburst,-
+scatter,visual-scatterChart
