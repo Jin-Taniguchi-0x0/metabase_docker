@@ -4,373 +4,384 @@ import time
 import requests
 import pandas as pd
 import os
-import pickle # For loading the KGE model
-import torch # PyTorchモデルの読み込みに必要
-from typing import List, Tuple, Dict, Any, Optional
+import torch
+import numpy as np
+from pykeen.triples import TriplesFactory
+from typing import List, Dict, Any, Optional
 
-
+# --- Metabase & App 設定 ---
 METABASE_SITE_URL = "http://localhost:3000"
 METABASE_API_URL = "http://metabase:3000"
-
-# ハードコードされたカード表示タイプのマッピング
-# card.get("display") の値をキーとし、表示したいview_nameを値とする
 CARD_DISPLAY_TYPE_MAPPING = {
     "area": "visual-areaChart",
     "bar": "visual-barChart",
     "donut": "visual-donutChart",
-    "funnel": "-",
-    "gauge": "-",
     "line": "visual-lineChart",
     "pie": "visual-pieChart",
-    "pivot-table": "visual-pivotTable", # Metabase APIのcard.displayの値と一致させる
+    "pivot-table": "visual-pivotTable",
     "map": "visual-map",
-    "sunburst": "-",
     "scatter": "visual-scatterChart",
-    "progress": "-",
-    "row": "-",
     "table": "visual-table",
-    "detail": "-",
-    "number": "-",
-    "combo": "-",
-    # 必要に応じて、Metabaseがサポートする他の表示タイプと
-    # 対応するview_nameをここに追加してください。
-    # "-" を値として設定すると、マッピングせずに元の表示タイプ名が使用されます。
+    "funnel": "visual-funnel",
+    "gauge": "visual-gauge",
+    "row": "visual-rowChart",
+    "waterfall": "visual-waterfallChart",
+    "combo": "visual-comboChart",
+    "smartscalar": "visual-scalar",
+    "progress": "visual-progress",
+    "sankey": "visual-sankey",
+    "object": "visual-object"
 }
 
-# スクリプトの場所を基準にマッピングファイルの絶対パスを構築
-# 想定されるプロジェクト構造:
-# project_root/
-#   ├── python-app/
-#   │   └── app.py
-#   └── rsc/
-#       └── viewMap.csv
-try:
-    # app.py が置かれているディレクトリの絶対パスを取得
-    _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-    # print(f"DEBUG: _SCRIPT_DIR is: {_SCRIPT_DIR}") # Uncomment for debugging path issues
-    # _SCRIPT_DIR から一つ上の階層に上がり、'rsc' ディレクトリ内の 'viewMap.csv' を指すパスを構築
-    _MAPPING_FILE_ABSOLUTE_PATH = os.path.normpath(os.path.join(_SCRIPT_DIR, "..", "rsc", "viewMap.csv"))
-except NameError:
-    # __file__ が定義されていない場合 (例: 一部の対話型環境やデプロイメントシナリオ)
-    # print("DEBUG: NameError occurred for __file__.") # Uncomment for debugging
-    st.warning("スクリプトパスの自動検出に失敗しました (__file__ が未定義)。相対パス '../rsc/viewMap.csv' を使用します。Docker環境では問題が発生する可能性があります。")
-    _MAPPING_FILE_ABSOLUTE_PATH = "../rsc/viewMap.csv" # 元の相対パス (フォールバック)
+# --- KGEモデル設定 ---
+MODEL_DIR = 'RotatE_1.0'
+TRIPLES_FILE = 'triple.csv'
+RELATION_PATTERN = 'd_j'
+CANONICAL_RELATION_NAME = 'view_to_dashboard'
+VIEW_PREFIX = 'visual-'
 
-MAPPING_DIR = _MAPPING_FILE_ABSOLUTE_PATH
-MODEL_PATH = "models/KGE_TransE_model.pkl" # Path within the Docker container
+# --- Helper Functions ---
+def normalize_id(input_id: Any) -> str:
+    if not isinstance(input_id, str):
+        input_id = str(input_id)
+    translation_table = str.maketrans("０１２３４５６７８９", "0123456789")
+    return input_id.translate(translation_table)
 
+# --- Metabase連携関数 ---
+def get_metabase_session(username, password):
+    api_url = f"{METABASE_API_URL}/api/session"
+    credentials = {"username": username, "password": password}
+    try:
+        response = requests.post(api_url, json=credentials)
+        response.raise_for_status()
+        return response.json().get("id")
+    except requests.exceptions.RequestException as e:
+        st.error(f"Metabaseへのログインに失敗しました: {e}")
+        return None
+
+def get_dashboard_details(session_id, dashboard_id):
+    api_url = f"{METABASE_API_URL}/api/dashboard/{dashboard_id}"
+    headers = {"X-Metabase-Session": session_id}
+    try:
+        response = requests.get(api_url, headers=headers)
+        if response.status_code == 404:
+            st.error(f"ID '{dashboard_id}' のダッシュボードが見つかりません。MetabaseでIDを確認してください。")
+            return None
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"ダッシュボード情報の取得に失敗しました: {e}")
+        return None
 
 @st.cache_data
-def load_mapping_data(mapping_file_path: str) -> Dict[str, str]:
-    """
-    カードタイトル名マッピング用のCSVファイルを読み込みます。
-    CSVファイルには 'original_name' (Metabase上のカード名) と 
-    'mapped_name' (表示したいカード名) の列が必要です。
-    """
+def get_db_and_table_ids(_session_id: str) -> Dict[str, Any]:
+    """Sample DatabaseとAccountsテーブル、および関連フィールドのIDを動的に取得する"""
+    headers = {"X-Metabase-Session": _session_id}
     try:
-        df = pd.read_csv(mapping_file_path)
-        if 'original_name' not in df.columns or 'mapped_name' not in df.columns:
-            st.warning(
-                f"マッピングファイル '{mapping_file_path}' には 'original_name' および "
-                f"'mapped_name' 列が必要です。カードタイトルのマッピングは行われません。"
-            )
+        db_response = requests.get(f"{METABASE_API_URL}/api/database", headers=headers)
+        db_response.raise_for_status()
+        databases = db_response.json()
+        
+        sample_db = next((db for db in databases.get('data', []) if db['name'] == 'Sample Database'), None)
+        if not sample_db:
+            st.error("Sample Databaseが見つかりませんでした。")
             return {}
-        mapping_dict = pd.Series(df.mapped_name.values, index=df.original_name).to_dict()
-        return mapping_dict
-    except FileNotFoundError:
-        st.info(f"カードタイトルマッピングファイルが見つかりません: {mapping_file_path}。カードタイトルのマッピングは行われません。")
-        return {}
-    except Exception as e:
-        st.error(f"カードタイトルマッピングファイルの読み込みに失敗しました: {e}")
-        return {}
+        
+        db_id = sample_db['id']
+        
+        table_response = requests.get(f"{METABASE_API_URL}/api/database/{db_id}/metadata", headers=headers)
+        table_response.raise_for_status()
+        tables_metadata = table_response.json()
+        
+        accounts_table = next((tbl for tbl in tables_metadata.get('tables', []) if tbl['name'].upper() == 'ACCOUNTS'), None)
+        if not accounts_table:
+            st.error("ACCOUNTSテーブルが見つかりませんでした。")
+            return {}
+        
+        country_field = next((fld for fld in accounts_table.get('fields', []) if fld['name'].upper() == 'COUNTRY'), None)
+        plan_field = next((fld for fld in accounts_table.get('fields', []) if fld['name'].upper() == 'PLAN'), None)
 
+        if not country_field or not plan_field:
+            st.error("COUNTRYまたはPLANフィールドがACCOUNTSテーブルに見つかりませんでした。")
+            return {}
 
-@st.cache_resource # Use st.cache_resource for models and other large objects
-def load_kge_model(model_path: str) -> Optional[Any]:
-    """KGEモデルをファイルから読み込みます。"""
-    absolute_model_path = os.path.join(_SCRIPT_DIR if '_SCRIPT_DIR' in globals() else '.', model_path)
-    # print(f"DEBUG: Attempting to load KGE model from: {absolute_model_path}") # Uncomment for debugging
-    try:
-        # モデルがPyTorchオブジェクトとして保存されている場合 (PyKeenモデルなど) は、
-        # pickle.load() の代わりに torch.load() を使用します。
-        # map_location=torch.device('cpu') は、GPUで訓練・保存されたモデルをCPU環境で読み込む際に役立ちます。
-        # PyTorch 2.6以降、weights_onlyのデフォルトがTrueに変更されたため、Falseを明示的に指定する必要があります。
-        # これは、信頼できるソースからのモデルファイルであることを前提としています。
-        model = torch.load(absolute_model_path, map_location=torch.device('cpu'), weights_only=False)
-        st.success(f"KGE推薦モデルの読み込みに成功しました (using torch.load): {absolute_model_path}")
-        return model
-    except pickle.UnpicklingError as e:
-        st.error(
-            f"モデルファイルのデシリアライズに失敗しました (Pickle/PyTorch): {e}\n"
-            f"torch.load() を weights_only=False で試みましたが、ファイルが期待されるPyTorch形式でないか、"
-            f"pickleのより深い問題（例: カスタムクラスの欠落、環境の不一致など）が発生している可能性があります。\n"
-            f"モデルの保存方法と、実行環境に必要なライブラリ（特にモデル作成に使用したライブラリのバージョン）が揃っているか確認してください。"
-        )
-        if "Unsupported operand 149" in str(e):
-            st.warning("エラーメッセージに 'Unsupported operand 149' が含まれています。これは、モデルの保存に使用されたPyTorchのバージョンと、現在の実行環境のPyTorchのバージョン間に互換性の問題がある可能性を示唆しています。")
-        return None
-    except FileNotFoundError:
-        st.error(f"KGEモデルファイルが見つかりません: {absolute_model_path}")
-        return None
-    except Exception as e:
-        st.error(f"KGEモデルの読み込み中に予期せぬエラーが発生しました: {e}")
-        st.exception(e) # 詳細なエラー情報を表示
-        return None
-
-
-def set_app_config():
-    """Streamlitページの基本設定を行います。"""
-    st.set_page_config(
-        page_title="推薦システムインターフェース テスト",
-        page_icon="🖥️",
-        layout="wide",
-        initial_sidebar_state="expanded",
-        menu_items={
-            'Get Help': 'https://www.extremelycoolapp.com/help',
-            'Report a bug': "https://www.extremelycoolapp.com/bug",
-            'About': "# This is a header. This is an *extremely* cool app!"
+        return {
+            "db_id": db_id, 
+            "table_id": accounts_table['id'],
+            "country_field_id": country_field['id'],
+            "plan_field_id": plan_field['id']
         }
-    )
+        
+    except requests.exceptions.RequestException as e:
+        st.error(f"データベースまたはテーブル情報の取得に失敗しました: {e}")
+        return {}
 
-
-def test_title():
-    """アプリケーションのヘッダーを表示します。"""
-    st.header("推薦システム")
-
-
-def test_button():
-    """テスト用のボタン群を表示します。"""
-    stylesheet = """ <style> button { height: auto; padding-top: 40px !important; padding-bottom: 40px !important; } </style> """
-    st.markdown(stylesheet, unsafe_allow_html=True)
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.button(':material/Show_Chart:', use_container_width=True)
-    with col2:
-        st.button(':material/Pie_Chart:', use_container_width=True)
-    with col3:
-        st.button(':material/Stacked_Bar_Chart:', use_container_width=True)
-    with col4:
-        st.button(':material/Bar_Chart:', use_container_width=True)
-
-
-def display_credentials_form():
-    """Metabaseの認証情報とダッシュボードIDを入力するフォームを表示します。"""
-    with st.form("secret_and_credentials_form"):
-        secret = st.text_input("Metabase JWT秘密鍵", type="password")
-        username = st.text_input("Metabase ユーザー名")
-        password = st.text_input("Metabase パスワード", type="password")
-        dashboard_id = st.number_input("ダッシュボードID", min_value=1, step=1, value=1)
-        submitted = st.form_submit_button("保存する")
-
-        if submitted and secret and username and password:
-            # Save inputs to session state
-            st.session_state.METABASE_SECRET_KEY = secret
-            st.session_state.METABASE_USERNAME = username
-            st.session_state.METABASE_PASSWORD = password
-            st.session_state.METABASE_DASHBOARD_ID = int(dashboard_id)
-
-            # Generate JWT token
-            payload = {
-                "resource": {"dashboard": int(dashboard_id)},
-                "params": {},
-                "exp": round(time.time()) + (60 * 60)  # 1 hour expiry
-            }
-            token = jwt.encode(payload, secret, algorithm="HS256")
-            if isinstance(token, bytes):
-                token = token.decode("utf-8")
-
-            # Store iframe URL
-            st.session_state.IFRAME_URL = f"{METABASE_SITE_URL}/embed/dashboard/{token}#bordered=true&titled=true"
-            st.rerun()
-
-
-def embed_dashboard():
-    """Metabaseダッシュボードをiframeで埋め込み表示します。"""
-    st.components.v1.iframe(st.session_state.IFRAME_URL, height=800)
-
-
-def get_metabase_session(username: str, password: str) -> Optional[str]:
-    url = f"{METABASE_API_URL}/api/session"
-    # print(f"DEBUG: Getting session from {url} for user {username}") # Uncomment for debugging
-    response = requests.post(url, json={"username": username, "password": password})
-    if response.status_code == 200:
-        return response.json()["id"]
-    else:
-        raise Exception(f"セッション取得に失敗しました: {response.status_code} - {response.text}")
-
-
-def get_dashboard_card_info(session_id: str, dashboard_id: int, title_mapping_data: Dict[str, str]) -> List[Tuple[int, str, str]]:
-    """
-    ダッシュボードに含まれるカードの (id, name, display) を一覧取得
-
-    Returns:
-        List[Tuple[int, str, str]]
-        title_mapping_data (dict): A dictionary for mapping original card titles to new titles.
-    """
-    url = f"{METABASE_API_URL}/api/dashboard/{dashboard_id}"
+def create_card(session_id: str, card_payload: Dict[str, Any]) -> Optional[int]:
+    """Metabaseに新しいカードを作成し、そのIDを返す"""
+    api_url = f"{METABASE_API_URL}/api/card"
     headers = {"X-Metabase-Session": session_id}
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        st.error(f"ダッシュボード取得に失敗しました（{response.status_code}）")
+    try:
+        response = requests.post(api_url, headers=headers, json=card_payload)
+        response.raise_for_status()
+        st.success(f"カード「{card_payload['name']}」が正常に作成されました！")
+        return response.json().get('id')
+    except requests.exceptions.RequestException as e:
+        st.error(f"カードの作成に失敗しました: {e}")
+        st.error(f"Metabaseからの応答: {e.response.text}")
+        return None
+
+# ★★★ 修正箇所ここから ★★★
+def add_card_to_dashboard(session_id: str, dashboard_id: str, card_id: int) -> bool:
+    """
+    指定されたカードをダッシュボードに追加する。
+    PUT /api/dashboard/{id} がdashcardリストの全要素にidを要求するエラーに対応するため、
+    新規カードに一時的なIDとして-1を付与してAPIの検証を通過させる。
+    """
+    dashboard_api_url = f"{METABASE_API_URL}/api/dashboard/{dashboard_id}"
+    headers = {"X-Metabase-Session": session_id}
+
+    try:
+        # 1. ダッシュボードの現在の状態を取得
+        get_response = requests.get(dashboard_api_url, headers=headers)
+        get_response.raise_for_status()
+        dashboard_data = get_response.json()
+
+        # 2. 既存のカードリストを取得
+        dashcards = dashboard_data.get('dashcards', [])
+        
+        # 3. 新規カードを配置する次の行を計算
+        max_row = 0
+        if dashcards:
+            max_row = max((c.get('row', 0) or 0) + (c.get('size_y', 0) or 0) for c in dashcards)
+
+        # 4. 新規カードの情報を作成し、必須の 'id' キーを追加
+        new_dashcard = {
+            "id": -1,  # APIの検証を通過させるための一時的なID
+            "card_id": card_id,
+            "row": max_row,
+            "col": 0,
+            "size_x": 6,
+            "size_y": 4,
+            "series": [],
+            "visualization_settings": {}
+        }
+        dashcards.append(new_dashcard)
+        
+        # 5. PUTリクエスト用にペイロードを再構築
+        update_payload = {
+            "name": dashboard_data.get("name"),
+            "description": dashboard_data.get("description"),
+            "dashcards": dashcards
+        }
+        
+        # 6. 更新されたペイロードでダッシュボードを更新
+        put_response = requests.put(dashboard_api_url, headers=headers, json=update_payload)
+        put_response.raise_for_status()
+        
+        return True
+
+    except requests.exceptions.RequestException as e:
+        st.error(f"カードのダッシュボードへの追加に失敗しました: {e}")
+        if e.response:
+            st.error(f"Metabaseからの応答: {e.response.text}")
+        return False
+# ★★★ 修正箇所ここまで ★★★
+
+# --- RotatEモデル用関数 ---
+@st.cache_resource
+def load_kge_model_and_data():
+    print(f"--- モデル '{MODEL_DIR}' とデータを読み込んでいます ---")
+    try:
+        model = torch.load(os.path.join(MODEL_DIR, 'trained_model.pkl'), weights_only=False)
+        model.eval()
+        factory_path = os.path.join(MODEL_DIR, 'training_triples.ptf')
+        training_factory = TriplesFactory.from_path_binary(factory_path)
+        df = pd.read_csv(TRIPLES_FILE, header=None, names=['subject', 'predicate', 'object'])
+        df = df.astype(str)
+        df['subject'] = df['subject'].str.strip()
+        df['object'] = df['object'].str.strip()
+        relation_mask = df['predicate'].str.contains(RELATION_PATTERN, na=False)
+        relation_df = df[relation_mask].copy()
+        swapped_rows_mask = relation_df['subject'].str.contains("dashboard", case=False, na=False)
+        relation_df.loc[swapped_rows_mask, ['subject', 'object']] = \
+            relation_df.loc[swapped_rows_mask, ['object', 'subject']].values
+        relation_df['predicate'] = CANONICAL_RELATION_NAME
+        print("モデルとデータの読み込みが完了しました。")
+        return model, training_factory, relation_df
+    except FileNotFoundError:
+        st.error(f"モデルディレクトリ '{MODEL_DIR}' または '{TRIPLES_FILE}' が見つかりません。")
+        return None, None, None
+
+def get_recommendations_from_kge(context_views: List[str], top_k: int = 10) -> List[str]:
+    kge_model = st.session_state.kge_model
+    training_factory = st.session_state.training_factory
+    relation_df = st.session_state.relation_df
+
+    if kge_model is None or training_factory is None:
+        st.error("KGEモデルがロードされていません。")
         return []
 
-    data = response.json()
-    cards = []
-
-    for item in data.get("dashcards", []):
-        card = item.get("card")
-        if card and card.get("id") is not None:
-            card_id = card["id"]
-            original_card_name = card.get("name", "(No Name)")
-            # Apply mapping: Use mapped name if exists, otherwise use original name
-            card_name = title_mapping_data.get(original_card_name, original_card_name)
-
-            original_card_display_type = card.get("display", "(Unknown)")
-
-            # ハードコードされたマッピングで表示タイプを変換
-            # マッピングが存在し、かつ値が"-"でない場合に変換後の値を採用
-            mapped_display_type = CARD_DISPLAY_TYPE_MAPPING.get(original_card_display_type)
-
-            if mapped_display_type and mapped_display_type != "-":
-                final_card_display_type = mapped_display_type
-            else: # mapped_display_type が None であるか、または "-" の場合
-                if mapped_display_type == "-": # 表示タイプのマッピングが "-" の場合
-                    final_card_display_type = f"##{original_card_display_type}##" # 元の表示タイプを##で囲む
-                else: # マッピングが存在しない場合
-                    final_card_display_type = original_card_display_type
-            cards.append((card_id, card_name, final_card_display_type))
-
-    return cards
-
-def display_dashboard_cards_info():
-    """現在のダッシュボードのカード情報を取得し表示します。"""
-    # Load card title mapping data
-    title_mapping_data = load_mapping_data(MAPPING_DIR)
-
-    try:
-        # Ensure necessary session state variables exist before proceeding
-        if not all(st.session_state.get(key) for key in ['METABASE_USERNAME', 'METABASE_PASSWORD', 'METABASE_DASHBOARD_ID']):
-            st.warning("Metabaseの認証情報またはダッシュボードIDが設定されていません。フォームから入力してください。")
-            return
-
-        session_id = get_metabase_session(
-            st.session_state.METABASE_USERNAME,
-            st.session_state.METABASE_PASSWORD
-        )
-        cards = get_dashboard_card_info(session_id, st.session_state.METABASE_DASHBOARD_ID, title_mapping_data)
-        if cards:
-            st.success(f"{len(cards)} 件のカードを取得しました：")
-            for i, (cid, cname, ctype) in enumerate(cards, 1):
-                st.write(f"{i}. ID: {cid} ｜タイトル: {cname} ｜タイプ: {ctype}")
-        else:
-            st.warning("カードが見つかりませんでした。")
-    except Exception as e:
-        st.error(f"カード情報の表示中にエラーが発生しました: {e}")
-
-
-def display_view_recommendations(kge_model: Any, current_cards: List[Tuple[int, str, str]]):
-    """KGEモデルを使ってビューの推薦を表示します。"""
-    if kge_model is None:
-        st.warning("推薦モデルがロードされていないため、ビューの推薦は利用できません。")
-        return
-
-    st.subheader("次に試すビューの推薦")
-
-    if not current_cards:
-        st.info("現在ダッシュボードにカードがありません。推薦の基準となるカードを選択してください。")
-        # TODO: もしカードがない場合でも推薦できるロジックがあればここに追加
-        return
-
-    # --- ここからモデルの仕様に合わせた処理 ---
-    # KGEモデル (特にPyKeenで訓練されたモデル) への入力形式を準備します。
-    # 例: 現在のカードID (エンティティID) のリスト、または特定の関係タイプ。
-    # モデルが期待する入力形式に合わせてこの部分を実装する必要があります。
+    entity_to_id = training_factory.entity_to_id
+    entity_embeddings = kge_model.entity_representations[0](indices=None).detach().cpu().numpy()
+    relation_embeddings = kge_model.relation_representations[0](indices=None).detach().cpu().numpy()
+    relation_id = training_factory.relation_to_id[CANONICAL_RELATION_NAME]
+    relation_embedding = relation_embeddings[relation_id]
     
-    current_card_ids = [card[0] for card in current_cards]
-    # current_card_names = [card[1] for card in current_cards] # 必要に応じて名前も使用
+    inferred_t_vectors = []
+    for view in context_views:
+        if view in entity_to_id:
+            view_embedding = entity_embeddings[entity_to_id[view]]
+            inferred_t_vectors.append(view_embedding * relation_embedding)
 
-    try:
-        # 例: PyKeenモデルの場合、以下のような予測方法が考えられます。
-        # (これはあくまで一般的な例であり、実際のモデルのAPIに合わせてください)
-        #
-        # if hasattr(kge_model, 'predict_tails'):
-        #     # head_ids = torch.tensor(current_card_ids)
-        #     # relation_ids = torch.tensor([RELATION_ID_FOR_NEXT_VIEW]) # "次のビュー" に対応する関係ID
-        #     # scores_df = kge_model.predict_tails(head_ids=head_ids, relation_ids=relation_ids, ...)
-        #     # recommended_view_ids = scores_df.sort_values(by='score', ascending=False)['tail_id'].tolist()[:5]
-        #     pass
-        # elif hasattr(kge_model, 'get_recommendations'): # カスタムメソッドの場合
-        #     # recommended_view_ids = kge_model.get_recommendations(current_card_ids, top_n=5)
-        #     pass
-        # else:
-        #     st.warning("モデルに適切な予測メソッドが見つかりません。")
-        #     return
+    if not inferred_t_vectors:
+        st.warning("コンテキストビューがモデルの語彙に一つも見つかりませんでした。")
+        return []
+    
+    inferred_dashboard_embedding = np.mean(inferred_t_vectors, axis=0)
+    
+    all_entities = set(entity_to_id.keys())
+    all_dashboards = set(relation_df['object'].unique())
+    candidate_views = [e for e in (all_entities - all_dashboards) if e.startswith(VIEW_PREFIX)]
+    
+    scores = []
+    for view in candidate_views:
+        if view in context_views or view not in entity_to_id:
+            continue
+        view_embedding = entity_embeddings[entity_to_id[view]]
+        h_r = view_embedding * relation_embedding
+        score = np.linalg.norm(h_r - inferred_dashboard_embedding)
+        scores.append({'view': view, 'score': float(score)})
+        
+    scores.sort(key=lambda x: x['score'])
+    
+    return [item['view'] for item in scores[:top_k]]
 
-        # --- ダミーの推薦ロジック (実際のモデル呼び出しに置き換えてください) ---
-        st.markdown(" **以下の推薦はダミーです。実際のモデルロジックに置き換えてください。** ")
-        if current_card_ids:
-            # ダミー: 現在のカードIDに基づいて単純な推薦を生成
-            dummy_recommendations = []
-            for i, cid in enumerate(current_card_ids[:1]): # 最初のカードを基準にする
-                 dummy_recommendations.extend([
-                     (cid + 100 + i, f"推薦ビュー {cid + 100 + i} (ダミー)"),
-                     (cid + 200 + i, f"推薦ビュー {cid + 200 + i} (ダミー)"),
-                 ])
-            recommended_views_info = [f"ID: {rec_id} - {rec_name}" for rec_id, rec_name in dummy_recommendations[:3]] # 上位3件
-        else:
-            recommended_views_info = ["推薦の基準となるカードがありません。"]
-        # --- ダミーの推薦ロジックここまで ---
+# --- Streamlit UI & メインロジック ---
+def display_credentials_form():
+    st.header("Metabase 認証情報")
+    with st.form("credentials_form"):
+        username = st.text_input("Metabase Username")
+        password = st.text_input("Metabase Password", type="password")
+        dashboard_id = st.text_input("Dashboard ID")
+        secret_key = st.text_input("Metabase Secret Key", type="password")
+        
+        submitted = st.form_submit_button("接続")
+        if submitted:
+            session_id = get_metabase_session(username, password)
+            if session_id:
+                st.session_state.metabase_session_id = session_id
+                st.session_state.dashboard_id = dashboard_id
+                st.session_state.secret_key = secret_key
+                st.rerun()
 
-        if recommended_views_info:
-            st.write("このダッシュボードに次に追加すると良いかもしれないビュー:")
-            for rec_info in recommended_views_info:
-                st.markdown(f"- {rec_info}")
-        else:
-            st.info("現時点では、このダッシュボードへの推薦はありません。")
+def embed_dashboard():
+    secret_key = st.session_state.secret_key
+    dashboard_id = normalize_id(st.session_state.dashboard_id)
+    
+    if not secret_key or not dashboard_id: return
 
-    except Exception as e:
-        st.error(f"推薦の生成中にエラーが発生しました: {e}")
-        st.exception(e) # 詳細なエラー情報を表示
+    payload = {"resource": {"dashboard": int(dashboard_id)}, "params": {}, "exp": round(time.time()) + (60 * 10)}
+    token = jwt.encode(payload, secret_key, algorithm="HS256")
+    iframe_url = f"{METABASE_SITE_URL}/embed/dashboard/{token}#bordered=true&titled=true"
+    st.components.v1.iframe(iframe_url, height=800, scrolling=True)
 
+def main():
+    st.set_page_config(layout="wide")
+    st.title("ダッシュボードビュー推薦システム (RotatE版)")
 
-if __name__ == '__main__':
-    # アプリケーションの初期設定（初回実行時のみ）
-    if 'app_initialized' not in st.session_state:
-        set_app_config()
-        st.session_state.app_initialized = True
+    if 'metabase_session_id' not in st.session_state: st.session_state.metabase_session_id = None
+    if 'dashboard_id' not in st.session_state: st.session_state.dashboard_id = ""
+    if 'secret_key' not in st.session_state: st.session_state.secret_key = ""
+    if 'kge_model' not in st.session_state:
+        st.session_state.kge_model, st.session_state.training_factory, st.session_state.relation_df = load_kge_model_and_data()
 
-    # 必要な情報がセッションに保存されているか確認
-    required_keys = ['IFRAME_URL', 'METABASE_USERNAME', 'METABASE_PASSWORD', 'METABASE_DASHBOARD_ID']
-    if not all(st.session_state.get(key) for key in required_keys):
+    if st.session_state.metabase_session_id is None:
         display_credentials_form()
     else:
-        # 認証情報とダッシュボードIDが設定されていればメインコンテンツを表示
-        test_title()
         embed_dashboard()
-        test_button()
-        display_dashboard_cards_info()
-
-        # KGEモデルをロード
-        kge_model = load_kge_model(MODEL_PATH)
         
-        if kge_model and st.session_state.get('METABASE_DASHBOARD_ID'):
-            # 現在のカード情報を取得して推薦関数に渡す
-            # 注意: display_dashboard_cards_info でもカード情報を取得しています。
-            # パフォーマンス向上のため、結果を st.session_state に保存して再利用することを検討できます。
-            # ここでは、明確性のために再度取得する形にしています。
-            try:
-                session_id_for_rec = get_metabase_session(
-                    st.session_state.METABASE_USERNAME,
-                    st.session_state.METABASE_PASSWORD
-                )
-                title_mapping_data_for_rec = load_mapping_data(MAPPING_DIR)
-                current_dashboard_cards = get_dashboard_card_info(
-                    session_id_for_rec,
-                    st.session_state.METABASE_DASHBOARD_ID,
-                    title_mapping_data_for_rec
-                )
-                display_view_recommendations(kge_model, current_dashboard_cards)
-            except Exception as e:
-                st.error(f"推薦表示の準備中にエラーが発生しました: {e}")
-                st.exception(e)
+        st.header("ビュー推薦")
+        
+        dashboard_id = normalize_id(st.session_state.dashboard_id)
+        
+        if dashboard_id:
+            dashboard_details = get_dashboard_details(st.session_state.metabase_session_id, dashboard_id)
+            current_views = []
+            if dashboard_details:
+                dashcards = dashboard_details.get("dashcards", [])
+                st.write("現在のダッシュボードに含まれるビュータイプ:")
+                card_views = [dashcard.get("card", {}).get("display") for dashcard in dashcards if dashcard.get("card")]
+                current_views = [view for view in [CARD_DISPLAY_TYPE_MAPPING.get(v) for v in card_views] if view is not None]
+                st.json(current_views)
+
+            if st.button("このダッシュボードにおすすめのビューを生成"):
+                if current_views:
+                    with st.spinner("RotatEモデルで推薦を生成中..."):
+                        recommendations = get_recommendations_from_kge(context_views=current_views, top_k=10)
+                    
+                    if recommendations:
+                        st.success("おすすめのビューが見つかりました！")
+                        st.write(recommendations)
+                    else:
+                        st.info("推薦できるビューはありませんでした。")
+                else:
+                    st.warning("推薦の基となるビューがダッシュボードにありません。")
+
+        st.header("サンプルチャート作成＆ダッシュボードに追加")
+        st.write("`Sample Database`の`ACCOUNTS`テーブルからサンプルチャートを作成し、現在表示中のダッシュボードに追加します。")
+        
+        ids = get_db_and_table_ids(st.session_state.metabase_session_id)
+        if ids:
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("棒グラフを作成＆追加"):
+                    bar_chart_payload = {
+                        "name": f"Sample Bar Chart (Accounts by Country) - {int(time.time())}",
+                        "display": "bar",
+                        "dataset_query": {
+                            "type": "query", "database": ids['db_id'],
+                            "query": {
+                                "source-table": ids['table_id'],
+                                "aggregation": [["count"]],
+                                "breakout": [["field", ids['country_field_id'], None]]
+                            }
+                        },
+                        "visualization_settings": {}
+                    }
+                    with st.spinner("棒グラフを作成中..."):
+                        card_id = create_card(st.session_state.metabase_session_id, bar_chart_payload)
+                    if card_id:
+                        with st.spinner("ダッシュボードに追加中..."):
+                            success = add_card_to_dashboard(st.session_state.metabase_session_id, dashboard_id, card_id)
+                        if success:
+                            st.success("ダッシュボードに追加しました！ページを更新します。")
+                            time.sleep(2)
+                            st.rerun()
+
+            with col2:
+                if st.button("円グラフを作成＆追加"):
+                    pie_chart_payload = {
+                        "name": f"Sample Pie Chart (Accounts by Plan) - {int(time.time())}",
+                        "display": "pie",
+                        "dataset_query": {
+                            "type": "query", "database": ids['db_id'],
+                            "query": {
+                                "source-table": ids['table_id'],
+                                "aggregation": [["count"]],
+                                "breakout": [["field", ids['plan_field_id'], None]]
+                            }
+                        },
+                        "visualization_settings": {}
+                    }
+                    with st.spinner("円グラフを作成中..."):
+                        card_id = create_card(st.session_state.metabase_session_id, pie_chart_payload)
+                    if card_id:
+                        with st.spinner("ダッシュボードに追加中..."):
+                            success = add_card_to_dashboard(st.session_state.metabase_session_id, dashboard_id, card_id)
+                        if success:
+                            st.success("ダッシュボードに追加しました！ページを更新します。")
+                            time.sleep(2)
+                            st.rerun()
+
+if __name__ == '__main__':
+    main()
