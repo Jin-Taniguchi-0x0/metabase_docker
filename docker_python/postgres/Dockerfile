@@ -1,4 +1,4 @@
-FROM postgres:10.3
+FROM postgres:16
 
 COPY dvdrental.tar /tmp/
 COPY create_db.sh /docker-entrypoint-initdb.d/

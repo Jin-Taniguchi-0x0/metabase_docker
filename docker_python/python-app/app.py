@@ -1,40 +1,45 @@
-from flask import Flask, jsonify, request
-import os
-from metabase_client import get_dashboards, get_session_token
+import streamlit as st
+import pandas as pd
 
-app = Flask(__name__)
+def set_config():
+    st.set_page_config(
+        page_title="推薦システムインターフェース テスト",
+        page_icon="🖥️",
+        layout="wide",
+        initial_sidebar_state="expanded",
+        menu_items={
+            'Get Help': 'https://www.extremelycoolapp.com/help',
+            'Report a bug': "https://www.extremelycoolapp.com/bug",
+            'About': "# This is a header. This is an *extremely* cool app!"
+        }
+    )
 
-# Metabaseの認証情報
-METABASE_USERNAME = os.environ.get('METABASE_USERNAME')
-METABASE_PASSWORD = os.environ.get('METABASE_PASSWORD')
-SESSION_ID = None
+def test_dashboard():
+    st.map()
 
-@app.route('/')
-def home():
-    return "Welcome to the Metabase Flask API"
+def test_title():
+    st.header("これはインターフェースのテストになります")
 
-@app.route('/get_session')
-def get_session():
-    global SESSION_ID
-    try:
-        # セッションIDを取得
-        SESSION_ID = get_session_token(METABASE_USERNAME, METABASE_PASSWORD)
-        return jsonify({"session_id": SESSION_ID})
-    except Exception as e:
-        return jsonify({"error": str(e)})
 
-@app.route('/dashboards')
-def dashboards():
-    global SESSION_ID
-    try:
-        if not SESSION_ID:
-            return jsonify({"error": "Session ID is not set. Please get the session ID first."})
-        
-        # セッションIDを使用してダッシュボード情報を取得
-        dashboards = get_dashboards(SESSION_ID)
-        return jsonify(dashboards)
-    except Exception as e:
-        return jsonify({"error": str(e)})
+def test_button():
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.button('😃')
+    with col2:
+        st.button('🥶')
+    with col3:
+        st.button('🥵')
+    with col4:
+        st.button('😈')
+
+# メイン処理
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    if 'main_controller' not in st.session_state:
+        set_config()
+        st.session_state.main_controller = True
+
+    test_title()
+    test_dashboard()
+    test_button()
+

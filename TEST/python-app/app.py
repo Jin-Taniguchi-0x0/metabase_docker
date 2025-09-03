@@ -7,7 +7,7 @@ import os
 import torch
 import numpy as np
 from pykeen.triples import TriplesFactory
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 # --- Metabase & App 設定 ---
 METABASE_SITE_URL = "http://localhost:3000"
@@ -32,6 +32,13 @@ CARD_DISPLAY_TYPE_MAPPING = {
     "sankey": "visual-sankey",
     "object": "visual-object"
 }
+# --- ★★★ 修正箇所：横幅24マスに合わせてサイズを再計算 ★★★
+SIZE_MAPPING = {
+    'S (幅1/3)': {'width': 8, 'height': 4},
+    'M (幅1/2)': {'width': 12, 'height': 5},
+    'L (幅2/3)': {'width': 16, 'height': 6}
+}
+
 
 # --- KGEモデル設定 ---
 MODEL_DIR = 'RotatE_1.0'
@@ -46,6 +53,31 @@ def normalize_id(input_id: Any) -> str:
         input_id = str(input_id)
     translation_table = str.maketrans("０１２３４５６７８９", "0123456789")
     return input_id.translate(translation_table)
+
+# --- ★★★ 修正箇所：grid_columnsのデフォルト値を24に変更 ★★★
+def find_empty_space(dashcards: List[Dict], card_width: int, card_height: int, grid_columns: int = 24) -> Tuple[int, int]:
+    """ダッシュボードの空きスペースを右上詰めで探索し、最適な(row, col)を返す"""
+    if not dashcards:
+        return (0, 0)
+
+    max_row_so_far = max((c.get('row', 0) + c.get('size_y', 0)) for c in dashcards) if dashcards else 0
+    grid_height = max_row_so_far + card_height
+    grid_map = np.zeros((grid_height, grid_columns), dtype=int)
+
+    for card in dashcards:
+        col = card.get('col', 0)
+        row = card.get('row', 0)
+        width = card.get('size_x', 6)
+        height = card.get('size_y', 4)
+        grid_map[row:row+height, col:col+width] = 1
+        
+    for r in range(grid_height - card_height + 1):
+        for c in range(grid_columns - card_width + 1):
+            if np.sum(grid_map[r:r+card_height, c:c+card_width]) == 0:
+                return (r, c)
+
+    return (max_row_so_far, 0)
+
 
 # --- Metabase連携関数 ---
 def get_metabase_session(username, password):
@@ -130,51 +162,51 @@ def create_card(session_id: str, card_payload: Dict[str, Any]) -> Optional[int]:
         st.error(f"Metabaseからの応答: {e.response.text}")
         return None
 
-# ★★★ 修正箇所ここから ★★★
-def add_card_to_dashboard(session_id: str, dashboard_id: str, card_id: int) -> bool:
+def add_card_to_dashboard(session_id: str, dashboard_id: str, card_id: int, size_x: int, size_y: int) -> bool:
     """
-    指定されたカードをダッシュボードに追加する。
-    PUT /api/dashboard/{id} がdashcardリストの全要素にidを要求するエラーに対応するため、
-    新規カードに一時的なIDとして-1を付与してAPIの検証を通過させる。
+    指定された幅と高さのカードを、ダッシュボードの最適な空きスペースに追加する。
     """
     dashboard_api_url = f"{METABASE_API_URL}/api/dashboard/{dashboard_id}"
     headers = {"X-Metabase-Session": session_id}
 
     try:
-        # 1. ダッシュボードの現在の状態を取得
         get_response = requests.get(dashboard_api_url, headers=headers)
         get_response.raise_for_status()
         dashboard_data = get_response.json()
 
-        # 2. 既存のカードリストを取得
-        dashcards = dashboard_data.get('dashcards', [])
+        has_tabs = "tabs" in dashboard_data and isinstance(dashboard_data.get("tabs"), list) and len(dashboard_data["tabs"]) > 0
         
-        # 3. 新規カードを配置する次の行を計算
-        max_row = 0
-        if dashcards:
-            max_row = max((c.get('row', 0) or 0) + (c.get('size_y', 0) or 0) for c in dashcards)
+        if has_tabs:
+            target_tab = dashboard_data["tabs"][0]
+            dashcards = target_tab.get("dashcards", [])
+        else:
+            dashcards = dashboard_data.get('dashcards', [])
+        
+        new_row, new_col = find_empty_space(dashcards, size_x, size_y)
 
-        # 4. 新規カードの情報を作成し、必須の 'id' キーを追加
         new_dashcard = {
-            "id": -1,  # APIの検証を通過させるための一時的なID
+            "id": -1,
             "card_id": card_id,
-            "row": max_row,
-            "col": 0,
-            "size_x": 6,
-            "size_y": 4,
+            "col": new_col,
+            "row": new_row,
+            "size_x": size_x,
+            "size_y": size_y,
             "series": [],
             "visualization_settings": {}
         }
+        
         dashcards.append(new_dashcard)
         
-        # 5. PUTリクエスト用にペイロードを再構築
         update_payload = {
             "name": dashboard_data.get("name"),
             "description": dashboard_data.get("description"),
-            "dashcards": dashcards
         }
+        if has_tabs:
+            target_tab["dashcards"] = dashcards
+            update_payload["tabs"] = dashboard_data["tabs"]
+        else:
+            update_payload["dashcards"] = dashcards
         
-        # 6. 更新されたペイロードでダッシュボードを更新
         put_response = requests.put(dashboard_api_url, headers=headers, json=update_payload)
         put_response.raise_for_status()
         
@@ -185,7 +217,6 @@ def add_card_to_dashboard(session_id: str, dashboard_id: str, card_id: int) -> b
         if e.response:
             st.error(f"Metabaseからの応答: {e.response.text}")
         return False
-# ★★★ 修正箇所ここまで ★★★
 
 # --- RotatEモデル用関数 ---
 @st.cache_resource
@@ -213,9 +244,11 @@ def load_kge_model_and_data():
         return None, None, None
 
 def get_recommendations_from_kge(context_views: List[str], top_k: int = 10) -> List[str]:
+    """
+    KGEモデルを用いてビューを推薦する。
+    """
     kge_model = st.session_state.kge_model
     training_factory = st.session_state.training_factory
-    relation_df = st.session_state.relation_df
 
     if kge_model is None or training_factory is None:
         st.error("KGEモデルがロードされていません。")
@@ -235,18 +268,18 @@ def get_recommendations_from_kge(context_views: List[str], top_k: int = 10) -> L
 
     if not inferred_t_vectors:
         st.warning("コンテキストビューがモデルの語彙に一つも見つかりませんでした。")
-        return []
+        all_possible_views = list(CARD_DISPLAY_TYPE_MAPPING.values())
+        return all_possible_views[:top_k]
     
     inferred_dashboard_embedding = np.mean(inferred_t_vectors, axis=0)
     
-    all_entities = set(entity_to_id.keys())
-    all_dashboards = set(relation_df['object'].unique())
-    candidate_views = [e for e in (all_entities - all_dashboards) if e.startswith(VIEW_PREFIX)]
+    candidate_views = list(CARD_DISPLAY_TYPE_MAPPING.values())
     
     scores = []
     for view in candidate_views:
         if view in context_views or view not in entity_to_id:
             continue
+        
         view_embedding = entity_embeddings[entity_to_id[view]]
         h_r = view_embedding * relation_embedding
         score = np.linalg.norm(h_r - inferred_dashboard_embedding)
@@ -254,7 +287,9 @@ def get_recommendations_from_kge(context_views: List[str], top_k: int = 10) -> L
         
     scores.sort(key=lambda x: x['score'])
     
-    return [item['view'] for item in scores[:top_k]]
+    recommended_views = [item['view'] for item in scores]
+    
+    return recommended_views[:top_k]
 
 # --- Streamlit UI & メインロジック ---
 def display_credentials_form():
@@ -309,6 +344,7 @@ def main():
             current_views = []
             if dashboard_details:
                 dashcards = dashboard_details.get("dashcards", [])
+                
                 st.write("現在のダッシュボードに含まれるビュータイプ:")
                 card_views = [dashcard.get("card", {}).get("display") for dashcard in dashcards if dashcard.get("card")]
                 current_views = [view for view in [CARD_DISPLAY_TYPE_MAPPING.get(v) for v in card_views] if view is not None]
@@ -330,11 +366,20 @@ def main():
         st.header("サンプルチャート作成＆ダッシュボードに追加")
         st.write("`Sample Database`の`ACCOUNTS`テーブルからサンプルチャートを作成し、現在表示中のダッシュボードに追加します。")
         
+        size_option = st.selectbox(
+            '追加するカードのサイズを選択してください',
+            list(SIZE_MAPPING.keys()),
+            key='card_size_selection'
+        )
+
         ids = get_db_and_table_ids(st.session_state.metabase_session_id)
         if ids:
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("棒グラフを作成＆追加"):
+                    selected_size_key = st.session_state.card_size_selection
+                    card_size = SIZE_MAPPING.get(selected_size_key)
+                    
                     bar_chart_payload = {
                         "name": f"Sample Bar Chart (Accounts by Country) - {int(time.time())}",
                         "display": "bar",
@@ -352,7 +397,13 @@ def main():
                         card_id = create_card(st.session_state.metabase_session_id, bar_chart_payload)
                     if card_id:
                         with st.spinner("ダッシュボードに追加中..."):
-                            success = add_card_to_dashboard(st.session_state.metabase_session_id, dashboard_id, card_id)
+                            success = add_card_to_dashboard(
+                                st.session_state.metabase_session_id, 
+                                dashboard_id, 
+                                card_id, 
+                                size_x=card_size['width'], 
+                                size_y=card_size['height']
+                            )
                         if success:
                             st.success("ダッシュボードに追加しました！ページを更新します。")
                             time.sleep(2)
@@ -360,6 +411,9 @@ def main():
 
             with col2:
                 if st.button("円グラフを作成＆追加"):
+                    selected_size_key = st.session_state.card_size_selection
+                    card_size = SIZE_MAPPING.get(selected_size_key)
+
                     pie_chart_payload = {
                         "name": f"Sample Pie Chart (Accounts by Plan) - {int(time.time())}",
                         "display": "pie",
@@ -377,7 +431,13 @@ def main():
                         card_id = create_card(st.session_state.metabase_session_id, pie_chart_payload)
                     if card_id:
                         with st.spinner("ダッシュボードに追加中..."):
-                            success = add_card_to_dashboard(st.session_state.metabase_session_id, dashboard_id, card_id)
+                            success = add_card_to_dashboard(
+                                st.session_state.metabase_session_id, 
+                                dashboard_id, 
+                                card_id, 
+                                size_x=card_size['width'], 
+                                size_y=card_size['height']
+                            )
                         if success:
                             st.success("ダッシュボードに追加しました！ページを更新します。")
                             time.sleep(2)
