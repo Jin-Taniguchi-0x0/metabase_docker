@@ -37,6 +37,12 @@ SIZE_MAPPING = {
     'M (幅1/2)': {'width': 12, 'height': 5},
     'L (幅2/3)': {'width': 16, 'height': 6}
 }
+JOIN_STRATEGY_MAP = {
+    "左外部結合 (Left Join)": "left-join",
+    "内部結合 (Inner Join)": "inner-join",
+    "右外部結合 (Right Join)": "right-join"
+}
+JOIN_STRATEGY_DISPLAY_MAP = {v: k for k, v in JOIN_STRATEGY_MAP.items()}
 
 
 # --- KGEモデル設定 ---
@@ -216,7 +222,30 @@ def get_recommendations_from_kge(context_views: List[str], top_k: int = 10) -> L
     scores.sort(key=lambda x: x['score'])
     return [item['view'] for item in scores][:top_k]
 
-# --- Streamlit UI & メインロジック ---
+# --- クエリビルダー関連ロジック ---
+
+def get_all_available_fields(selections: Dict) -> List[Dict]:
+    """ベーステーブルと結合テーブルの全フィールドをMBQL形式で返す"""
+    all_fields = []
+    # ベーステーブルのフィールドを追加
+    for field in selections.get("available_fields", []):
+        field_copy = field.copy()
+        field_copy['mbql_ref'] = ["field", field['id'], None]
+        field_copy['display_name_with_table'] = f"{selections['table_name']} -> {field['display_name']}"
+        all_fields.append(field_copy)
+
+    # 結合テーブルのフィールドを追加
+    for join in selections.get("joins", []):
+        join_alias = join["join_alias"]
+        target_table = next((tbl for tbl in st.session_state.tables_metadata if tbl['id'] == join['target_table_id']), None)
+        if target_table:
+            for field in target_table.get("fields", []):
+                field_copy = field.copy()
+                field_copy['mbql_ref'] = ["field", field['id'], {"join-alias": join_alias}]
+                field_copy['display_name_with_table'] = f"{target_table['display_name']} ({join_alias}) -> {field['display_name']}"
+                all_fields.append(field_copy)
+
+    return all_fields
 
 def handle_table_selection():
     """テーブル選択が変更されたときに呼び出されるコールバック関数"""
@@ -226,6 +255,7 @@ def handle_table_selection():
     if selected_table_name:
         table_options = {tbl['display_name']: tbl for tbl in st.session_state.tables_metadata}
         selected_table = table_options[selected_table_name]
+        # テーブル変更時は結合情報とフィルターをリセット
         selections.update({
             "table_id": selected_table['id'],
             "table_name": selected_table_name,
@@ -233,38 +263,56 @@ def handle_table_selection():
             "joins": [], "filters": [], "aggregation": [], "breakout_id": None
         })
     else:
-        selections.update({"table_id": None, "table_name": None, "available_fields": [], "filters": []})
+        selections.update({"table_id": None, "table_name": None, "available_fields": [], "filters": [], "joins": []})
 
-def handle_custom_chart_submission(agg_type, breakout_field_id, agg_field_id=None):
+def handle_custom_chart_submission(agg_type, breakout_field_ref, agg_field_ref=None):
     """拡張されたフォーム情報からMBQLペイロードを構築し、APIを呼び出す"""
     selections = st.session_state.query_builder_selections
     table_id = selections['table_id']
 
-    if not table_id or not breakout_field_id:
+    if not table_id or not breakout_field_ref:
         st.error("テーブルとグループ化する列を選択してください。")
         return
 
     selected_table = next((tbl for tbl in st.session_state.tables_metadata if tbl['id'] == table_id), None)
-    breakout_field = next((fld for fld in selections['available_fields'] if fld['id'] == breakout_field_id), None)
+    
+    all_fields = get_all_available_fields(selections)
+    breakout_field = next((f for f in all_fields if f['mbql_ref'] == breakout_field_ref), None)
 
+    # --- MBQLクエリ構築 ---
     query = {"source-table": table_id}
 
+    # Joins
+    if selections["joins"]:
+        joins_payload = []
+        for join in selections["joins"]:
+            joins_payload.append({
+                "alias": join["join_alias"],
+                "source-table": join["target_table_id"],
+                "condition": join["condition"],
+                "strategy": join["strategy"],
+                "fields": "all"
+            })
+        query["joins"] = joins_payload
+
+    # Aggregation
     field_required_aggs = ["sum", "avg", "distinct", "cum-sum", "stddev", "min", "max"]
     if agg_type in field_required_aggs:
-        if not agg_field_id:
+        if not agg_field_ref:
             st.error("この集約方法には集計対象の列が必要です。"); return
-        query["aggregation"] = [[agg_type, ["field", agg_field_id, None]]]
+        query["aggregation"] = [[agg_type, agg_field_ref]]
     else: # count, cum-count
         query["aggregation"] = [[agg_type]]
 
-    query["breakout"] = [["field", breakout_field_id, None]]
+    # Breakout
+    query["breakout"] = [breakout_field_ref]
 
+    # Filters
     if selections["filters"]:
         filter_clauses = []
         for f in selections["filters"]:
-            clause = []
             op = f["operator"]
-            field_clause = ["field", f["field_id"], None]
+            field_clause = f["field_ref"]
             
             if op in ["is-null", "not-null"]:
                 clause = [op, field_clause]
@@ -285,11 +333,14 @@ def handle_custom_chart_submission(agg_type, breakout_field_id, agg_field_id=Non
             query["filter"] = ["and"] + filter_clauses
         elif filter_clauses:
             query["filter"] = filter_clauses[0]
-            
-    agg_field = next((fld for fld in selections['available_fields'] if fld['id'] == agg_field_id), None) if agg_field_id else None
+
+    # --- カード名生成 ---
+    agg_field = next((f for f in all_fields if f['mbql_ref'] == agg_field_ref), None) if agg_field_ref else None
     agg_str = f"の{agg_field['display_name']}" if agg_field else ""
     
-    card_name = f"棒グラフ: {selected_table['display_name']}の{breakout_field['display_name']}別 {st.session_state.agg_type_name}{agg_str}"
+    card_name = f"棒グラフ: {breakout_field['display_name']}別 {st.session_state.agg_type_name}{agg_str}"
+    
+    # --- APIペイロード作成と実行 ---
     payload = {
         "name": card_name, "display": "bar",
         "dataset_query": {"type": "query", "database": selected_table['db_id'], "query": query},
@@ -310,8 +361,144 @@ def handle_custom_chart_submission(agg_type, breakout_field_id, agg_field_id=Non
             st.session_state.query_builder_selections = {"table_id": None, "table_name": None, "joins": [], "filters": [], "aggregation": [], "breakout_id": None, "breakout_name": None, "available_fields": []}
             time.sleep(2); st.rerun()
 
+# --- クエリビルダーUIの分割された関数 ---
+
+def display_existing_filters(selections: Dict):
+    """クエリビルダー内で現在設定されているフィルターを表示する"""
+    for i, f in enumerate(selections["filters"]):
+        value_str = f"`{f['value1']}`" + (f" と `{f['value2']}`" if f.get('value2') is not None else "")
+        cols = st.columns([4, 3, 3, 1])
+        cols[0].info(f"`{f['field_name']}`")
+        cols[1].info(f"{f['operator_name']}")
+        cols[2].info(value_str)
+        if cols[3].button("🗑️", key=f"del_filter_{i}", help="このフィルターを削除"):
+            selections["filters"].pop(i)
+            st.rerun()
+
+def display_add_filter_form(selections: Dict):
+    """クエリビルダー内で新しいフィルターを追加するためのフォームを表示する"""
+    with st.expander("＋ フィルターを追加する"):
+        all_fields = get_all_available_fields(selections)
+        field_options = {f['display_name_with_table']: f for f in all_fields}
+        
+        cols = st.columns(2)
+        new_filter_field_display_name = cols[0].selectbox("列", field_options.keys(), index=None, key="new_filter_field")
+        
+        operator_map = {"である": "=", "ではない": "!=", "より大きい": ">", "より小さい": "<", "以上": ">=", "以下": "<=", "範囲": "between", "空": "is-null", "空ではない": "not-null"}
+        new_filter_op_name = cols[1].selectbox("条件", operator_map.keys(), index=None, key="new_filter_op")
+
+        new_filter_value1, new_filter_value2 = None, None
+        if new_filter_op_name and operator_map[new_filter_op_name] not in ["is-null", "not-null"]:
+            if operator_map[new_filter_op_name] == "between":
+                val_cols = st.columns(2)
+                new_filter_value1 = val_cols[0].text_input("開始値", key="new_filter_value1")
+                new_filter_value2 = val_cols[1].text_input("終了値", key="new_filter_value2")
+            else:
+                new_filter_value1 = st.text_input("値", key="new_filter_value1")
+
+        if st.button("フィルターを追加"):
+            if new_filter_field_display_name and new_filter_op_name:
+                selected_field = field_options[new_filter_field_display_name]
+                selections["filters"].append({
+                    "field_ref": selected_field['mbql_ref'], 
+                    "field_name": selected_field['display_name_with_table'], 
+                    "operator": operator_map[new_filter_op_name], 
+                    "operator_name": new_filter_op_name, 
+                    "value1": new_filter_value1, 
+                    "value2": new_filter_value2
+                })
+                st.rerun()
+
+def display_existing_joins(selections: Dict):
+    """クエリビルダー内で現在設定されている結合を表示する"""
+    for i, join in enumerate(selections["joins"]):
+        with st.container(border=True):
+            cols = st.columns([0.9, 0.1])
+            
+            base_field = next((f for f in selections['available_fields'] if f['id'] == join['condition'][1][1]), None)
+            target_table = next((t for t in st.session_state.tables_metadata if t['id'] == join['target_table_id']), None)
+            
+            if target_table:
+                target_field = next((f for f in target_table['fields'] if f['id'] == join['condition'][2][1]), None)
+                if base_field and target_field:
+                    join_type_display = JOIN_STRATEGY_DISPLAY_MAP.get(join['strategy'], join['strategy'])
+                    join_str = (
+                        f"**{selections['table_name']}** に **{join_type_display}** で **{join['target_table_name']}** を結合"
+                        f"<br>条件: `{base_field['name']}` = `{target_field['name']}`"
+                    )
+                    cols[0].markdown(join_str, unsafe_allow_html=True)
+            
+            if cols[1].button("🗑️", key=f"del_join_{i}", help="この結合を削除"):
+                selections["joins"].pop(i)
+                st.rerun()
+
+def display_join_builder(selections: Dict):
+    """クエリビルダー内で新しい結合を追加するためのフォームを表示する"""
+    with st.expander("＋ 結合を追加する"):
+        # 結合可能なテーブルリスト (ベーステーブルを除く)
+        joinable_tables = {tbl['display_name']: tbl for tbl in st.session_state.tables_metadata if tbl['id'] != selections['table_id']}
+        
+        target_table_name = st.selectbox("結合するテーブル", joinable_tables.keys(), index=None, key="join_target_table", placeholder="テーブルを選択...")
+        
+        if target_table_name:
+            target_table = joinable_tables[target_table_name]
+
+            join_type_display_name = st.selectbox("結合方法", JOIN_STRATEGY_MAP.keys(), key="join_strategy")
+
+            st.write("結合条件:")
+            cols = st.columns([5, 1, 5])
+            
+            base_fields = {f['display_name']: f['id'] for f in selections['available_fields']}
+            base_field_name = cols[0].selectbox(f"{selections['table_name']} の列", base_fields.keys(), index=None, key="join_base_field")
+            
+            cols[1].markdown("<p style='text-align: center; font-size: 24px; margin-top: 25px'>=</p>", unsafe_allow_html=True)
+            
+            target_fields = {f['display_name']: f['id'] for f in target_table['fields']}
+            target_field_name = cols[2].selectbox(f"{target_table_name} の列", target_fields.keys(), index=None, key="join_target_field")
+
+            if st.button("結合を追加"):
+                if base_field_name and target_field_name and join_type_display_name:
+                    join_count = len(selections.get("joins", []))
+                    join_alias = f"_join_{join_count + 1}"
+                    new_join = {
+                        "target_table_id": target_table['id'],
+                        "target_table_name": target_table_name,
+                        "join_alias": join_alias,
+                        "strategy": JOIN_STRATEGY_MAP[join_type_display_name],
+                        "condition": ["=", ["field", base_fields[base_field_name], None], ["field", target_fields[target_field_name], {"join-alias": join_alias}]]
+                    }
+                    selections["joins"].append(new_join)
+                    st.rerun()
+
+def display_aggregation_breakout_form(selections: Dict) -> Tuple[Optional[str], Optional[Any], Optional[Any]]:
+    """クエリビルダー内で集約とグループ化の選択フォームを表示する"""
+    all_fields = get_all_available_fields(selections)
+    
+    cols = st.columns(2)
+    agg_map = {"行のカウント": "count", "..の合計": "sum", "..の平均": "avg", "..の異なる値の数": "distinct", "..の累積合計": "cum-sum", "行の累積カウント": "cum-count", "..の標準偏差": "stddev", "..の最小値": "min", "..の最大値": "max"}
+    agg_type_name = cols[0].selectbox("集約方法", agg_map.keys(), key="agg_type_name")
+    
+    agg_field_ref = None
+    field_required_aggs = ["sum", "avg", "distinct", "cum-sum", "stddev", "min", "max"]
+    if agg_map[agg_type_name] in field_required_aggs:
+        numeric_fields = {
+            f['display_name_with_table']: f['mbql_ref'] 
+            for f in all_fields 
+            if any(t in f['base_type'].lower() for t in ['integer', 'float', 'double', 'decimal']) 
+            and f.get('semantic_type') not in ['type/PK', 'type/FK']
+        }
+        agg_field_display_name = cols[0].selectbox("集計対象の列", numeric_fields.keys(), key="agg_field_name", index=None)
+        if agg_field_display_name:
+            agg_field_ref = numeric_fields[agg_field_display_name]
+    
+    field_options = {f['display_name_with_table']: f['mbql_ref'] for f in all_fields}
+    breakout_field_display_name = cols[1].selectbox("グループ化する列", field_options.keys(), index=None, key="breakout_field_name")
+    breakout_field_ref = field_options.get(breakout_field_display_name)
+    
+    return agg_type_name, agg_field_ref, breakout_field_ref
+
 def display_custom_chart_form():
-    """高機能クエリビルダーのUIを表示する"""
+    """高機能クエリビルダーのUIを表示する（リファクタリング・結合機能追加版）"""
     selections = st.session_state.query_builder_selections
     
     with st.container(border=True):
@@ -321,69 +508,28 @@ def display_custom_chart_form():
         st.selectbox("1. ベースとなるテーブルを選択", table_options.keys(), index=list(table_options.keys()).index(selections["table_name"]) if selections["table_name"] else None, on_change=handle_table_selection, key="selected_table_name_key", placeholder="テーブルを選択...")
 
         if selections["table_id"]:
+            # --- 結合セクション ---
+            st.markdown("---")
+            st.markdown("**テーブル結合**")
+            display_existing_joins(selections)
+            display_join_builder(selections)
+            
+            # --- フィルターセクション ---
             st.markdown("---")
             st.markdown("**フィルター**")
-            for i, f in enumerate(selections["filters"]):
-                value_str = f"`{f['value1']}`" + (f" と `{f['value2']}`" if f.get('value2') is not None else "")
-                cols = st.columns([4, 3, 3, 1])
-                cols[0].info(f"`{f['field_name']}`")
-                cols[1].info(f"{f['operator_name']}")
-                cols[2].info(value_str)
-                if cols[3].button("🗑️", key=f"del_filter_{i}", help="このフィルターを削除"):
-                    selections["filters"].pop(i); st.rerun()
+            display_existing_filters(selections)
+            display_add_filter_form(selections)
             
-            with st.expander("＋ フィルターを追加する"):
-                field_options = {f['display_name']: f for f in selections["available_fields"]}
-                
-                cols = st.columns(2)
-                new_filter_field_name = cols[0].selectbox("列", field_options.keys(), index=None, key="new_filter_field")
-                
-                operator_map = {"である": "=", "ではない": "!=", "より大きい": ">", "より小さい": "<", "以上": ">=", "以下": "<=", "範囲": "between", "空": "is-null", "空ではない": "not-null"}
-                new_filter_op_name = cols[1].selectbox("条件", operator_map.keys(), index=None, key="new_filter_op")
-
-                new_filter_value1, new_filter_value2 = None, None
-                if new_filter_op_name and operator_map[new_filter_op_name] not in ["is-null", "not-null"]:
-                    if operator_map[new_filter_op_name] == "between":
-                        val_cols = st.columns(2)
-                        new_filter_value1 = val_cols[0].text_input("開始値", key="new_filter_value1")
-                        new_filter_value2 = val_cols[1].text_input("終了値", key="new_filter_value2")
-                    else:
-                        new_filter_value1 = st.text_input("値", key="new_filter_value1")
-
-                if st.button("フィルターを追加"):
-                    if new_filter_field_name and new_filter_op_name:
-                        selections["filters"].append({
-                            "field_id": field_options[new_filter_field_name]['id'], "field_name": new_filter_field_name, 
-                            "operator": operator_map[new_filter_op_name], "operator_name": new_filter_op_name, 
-                            "value1": new_filter_value1, "value2": new_filter_value2
-                        })
-                        st.rerun()
-
+            # --- 集約・グループ化セクション ---
             st.markdown("---")
             st.markdown("**集約**")
-            cols = st.columns(2)
-            agg_map = {"行のカウント": "count", "..の合計": "sum", "..の平均": "avg", "..の異なる値の数": "distinct", "..の累積合計": "cum-sum", "行の累積カウント": "cum-count", "..の標準偏差": "stddev", "..の最小値": "min", "..の最大値": "max"}
-            agg_type_name = cols[0].selectbox("集約方法", agg_map.keys(), key="agg_type_name")
-            agg_field_name = None
+            agg_type_name, agg_field_ref, breakout_field_ref = display_aggregation_breakout_form(selections)
             
-            field_required_aggs = ["sum", "avg", "distinct", "cum-sum", "stddev", "min", "max"]
-            if agg_map[agg_type_name] in field_required_aggs:
-                # ★★★ 修正箇所: ID関連フィールドを除外 ★★★
-                numeric_fields = {
-                    f['display_name']: f['id'] 
-                    for f in selections["available_fields"] 
-                    if any(t in f['base_type'].lower() for t in ['integer', 'float', 'double', 'decimal']) 
-                    and f.get('semantic_type') not in ['type/PK', 'type/FK']
-                }
-                agg_field_name = cols[0].selectbox("集計対象の列", numeric_fields.keys(), key="agg_field", index=None)
-            
-            breakout_field_name = cols[1].selectbox("グループ化する列", field_options.keys(), index=None, key="breakout_field")
-
+            # --- 送信ボタン ---
             st.markdown("---")
             if st.button("作成してダッシュボードに追加", type="primary"):
-                agg_field_id = numeric_fields.get(agg_field_name) if 'numeric_fields' in locals() and agg_field_name else None
-                breakout_field_id = field_options[breakout_field_name]['id'] if breakout_field_name else None
-                handle_custom_chart_submission(agg_type=agg_map[agg_type_name], agg_field_id=agg_field_id, breakout_field_id=breakout_field_id)
+                agg_map = {"行のカウント": "count", "..の合計": "sum", "..の平均": "avg", "..の異なる値の数": "distinct", "..の累積合計": "cum-sum", "行の累積カウント": "cum-count", "..の標準偏差": "stddev", "..の最小値": "min", "..の最大値": "max"}
+                handle_custom_chart_submission(agg_type=agg_map[agg_type_name], agg_field_ref=agg_field_ref, breakout_field_ref=breakout_field_ref)
 
     if st.button("ビルダーを閉じる"):
         st.session_state.show_custom_chart_form = False
