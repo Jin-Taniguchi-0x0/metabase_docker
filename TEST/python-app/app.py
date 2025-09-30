@@ -273,7 +273,7 @@ def handle_table_selection():
     else:
         selections.update({"table_id": None, "table_name": None, "available_fields": [], "filters": [], "joins": []})
 
-def handle_custom_chart_submission(chart_display_name: str, agg_type: Optional[str], breakout_field_ref=None, agg_field_ref=None, aggregations=None):
+def handle_custom_chart_submission(chart_display_name: str, agg_type: Optional[str], breakout_field_ref=None, agg_field_ref=None, aggregations=None, scatter_axes=None):
     """拡張されたフォーム情報からMBQLペイロードを構築し、APIを呼び出す"""
     selections = st.session_state.query_builder_selections
     table_id = selections['table_id']
@@ -286,10 +286,10 @@ def handle_custom_chart_submission(chart_display_name: str, agg_type: Optional[s
     if chart_display_name in charts_with_breakout and not breakout_field_ref:
         st.error("このグラフの種類には「グループ化する列」の選択が必要です。")
         return
-    if chart_display_name == "散布図" and (not aggregations or len(aggregations) < 2):
-        st.error("散布図にはX軸とY軸、両方の指標を設定してください。")
+    if chart_display_name == "散布図" and (not scatter_axes or not scatter_axes.get("x_axis") or not scatter_axes.get("y_axis")):
+        st.error("散布図にはX軸とY軸、両方の列を設定してください。")
         return
-
+        
     selected_table = next((tbl for tbl in st.session_state.tables_metadata if tbl['id'] == table_id), None)
     all_fields = get_all_available_fields(selections)
     
@@ -302,9 +302,37 @@ def handle_custom_chart_submission(chart_display_name: str, agg_type: Optional[s
             "condition": join["condition"], "strategy": join["strategy"], "fields": "all"
         } for join in selections["joins"]]
 
-    # Aggregation
+    visualization_settings = {}
     if chart_display_name == "散布図":
-        query["aggregation"] = aggregations
+        x_axis_ref = scatter_axes["x_axis"]
+        y_axis_ref = scatter_axes["y_axis"]
+
+        # 散布図では集計せず、選択された列をそのまま使う
+        # query["fields"] に軸とグループ化の列を指定する
+        query["fields"] = [x_axis_ref, y_axis_ref]
+        if breakout_field_ref:
+            query["fields"].append(breakout_field_ref)
+
+        # クエリ結果の列名を取得
+        x_field = next((f for f in all_fields if f['mbql_ref'] == x_axis_ref), None)
+        y_field = next((f for f in all_fields if f['mbql_ref'] == y_axis_ref), None)
+        
+        x_col_name = x_field['name'] if x_field else None
+        y_col_name = y_field['name'] if y_field else None
+        
+        if not x_col_name or not y_col_name:
+            st.error("軸の列名を取得できませんでした。")
+            return
+
+        # 資料に基づいた正しい visualization_settings
+        visualization_settings = {
+            "graph.dimensions": [x_col_name],  # X軸
+            "graph.metrics": [y_col_name]     # Y軸
+        }
+        
+        if breakout_field_ref:
+            breakout_field = next((f for f in all_fields if f['mbql_ref'] == breakout_field_ref), None)
+
     else:
         field_required_aggs = ["sum", "avg", "distinct", "cum-sum", "stddev", "min", "max"]
         if agg_type in field_required_aggs:
@@ -313,17 +341,16 @@ def handle_custom_chart_submission(chart_display_name: str, agg_type: Optional[s
             query["aggregation"] = [[agg_type, agg_field_ref]]
         else:
             query["aggregation"] = [[agg_type]]
-
-    if breakout_field_ref:
+    
+    if breakout_field_ref and chart_display_name != "散布図":
         query["breakout"] = [breakout_field_ref]
 
-    # Filters
+    # Filters (変更なし)
     if selections["filters"]:
         filter_clauses = []
         for f in selections["filters"]:
             op, field_clause = f["operator"], f["field_ref"]
-            if op in ["is-null", "not-null"]:
-                clause = [op, field_clause]
+            if op in ["is-null", "not-null"]: clause = [op, field_clause]
             elif op == "between":
                 try: v1, v2 = float(f["value1"]), float(f["value2"])
                 except (ValueError, TypeError): st.error(f"フィルター「{f['field_name']}」の範囲指定の値が無効です。"); return
@@ -336,16 +363,18 @@ def handle_custom_chart_submission(chart_display_name: str, agg_type: Optional[s
         if len(filter_clauses) > 1: query["filter"] = ["and"] + filter_clauses
         elif filter_clauses: query["filter"] = filter_clauses[0]
 
-    # --- カード名生成 ---
+    # --- カード名生成ロジックの修正 ---
+    card_name = ""
     if chart_display_name == "散布図":
-        y_agg_field = next((f for f in all_fields if f['mbql_ref'] == aggregations[0][1]), None)
-        x_agg_field = next((f for f in all_fields if f['mbql_ref'] == aggregations[1][1]), None)
+        x_field = next((f for f in all_fields if f['mbql_ref'] == scatter_axes["x_axis"]), None)
+        y_field = next((f for f in all_fields if f['mbql_ref'] == scatter_axes["y_axis"]), None)
         breakout_field = next((f for f in all_fields if f['mbql_ref'] == breakout_field_ref), None) if breakout_field_ref else None
         
-        y_agg_name = f"{y_agg_field['display_name']}の{aggregations[0][0]}" if y_agg_field else "Y軸指標"
-        x_agg_name = f"{x_agg_field['display_name']}の{aggregations[1][0]}" if x_agg_field else "X軸指標"
-        breakout_name = f"{breakout_field['display_name']}別 " if breakout_field else ""
-        card_name = f"散布図: {breakout_name}{y_agg_name} vs {x_agg_name}"
+        if x_field and y_field:
+            x_name = x_field['display_name']
+            y_name = y_field['display_name']
+            breakout_name = f" ({breakout_field['display_name']}別)" if breakout_field else ""
+            card_name = f"散布図: {y_name} vs {x_name}{breakout_name}"
     else:
         agg_field = next((f for f in all_fields if f['mbql_ref'] == agg_field_ref), None) if agg_field_ref else None
         agg_str = f"の{agg_field['display_name_with_table']}" if agg_field else ""
@@ -357,11 +386,12 @@ def handle_custom_chart_submission(chart_display_name: str, agg_type: Optional[s
 
     # --- APIペイロード作成と実行 ---
     payload = {
-        "name": card_name, "display": CHART_TYPE_MAP[chart_display_name],
+        "name": card_name,
+        "display": CHART_TYPE_MAP.get(chart_display_name, "table"),
         "dataset_query": {"type": "query", "database": selected_table['db_id'], "query": query},
-        "visualization_settings": {}
+        "visualization_settings": visualization_settings
     }
-
+    
     dashboard_id = normalize_id(st.session_state.dashboard_id)
     card_size = SIZE_MAPPING.get(st.session_state.card_size_selection)
     with st.spinner("グラフを作成中..."):
@@ -381,9 +411,7 @@ def display_existing_filters(selections: Dict):
     for i, f in enumerate(selections["filters"]):
         value_str = f"`{f['value1']}`" + (f" と `{f['value2']}`" if f.get('value2') is not None else "")
         cols = st.columns([4, 3, 3, 1])
-        cols[0].info(f"`{f['field_name']}`")
-        cols[1].info(f"{f['operator_name']}")
-        cols[2].info(value_str)
+        cols[0].info(f"`{f['field_name']}`"); cols[1].info(f"{f['operator_name']}"); cols[2].info(value_str)
         if cols[3].button("🗑️", key=f"del_filter_{i}", help="このフィルターを削除"):
             selections["filters"].pop(i); st.rerun()
 
@@ -470,37 +498,39 @@ def display_aggregation_breakout_form(selections: Dict, show_breakout: bool = Tr
         breakout_field_ref = field_options.get(breakout_field_display_name)
     return agg_type_name, agg_field_ref, breakout_field_ref
 
-def display_scatter_plot_form(selections: Dict) -> Tuple[Optional[List], Optional[Any]]:
+def display_scatter_plot_form(selections: Dict) -> Tuple[Optional[Dict], Optional[Any]]:
     st.info("散布図は、2つの指標（数値）の関係性を可視化します。オプションでカテゴリによる色分けも可能です。")
     all_fields = get_all_available_fields(selections)
-    numeric_fields = {f['display_name_with_table']: f['mbql_ref'] for f in all_fields if any(t in f['base_type'].lower() for t in ['integer', 'float', 'double', 'decimal']) and f.get('semantic_type') not in ['type/PK', 'type/FK']}
-    agg_map = {"合計": "sum", "平均": "avg", "異なる値の数": "distinct", "標準偏差": "stddev", "最小値": "min", "最大値": "max"}
+    numeric_fields = {
+        f['display_name_with_table']: f['mbql_ref'] 
+        for f in all_fields 
+        if any(t in f.get('base_type', '').lower() for t in ['integer', 'float', 'double', 'decimal']) 
+        and f.get('semantic_type') not in ['type/PK', 'type/FK']
+    }
     
-    aggregations = []
-    
-    # Y-Axis
+    # --- Y軸の選択 ---
     st.markdown("##### Y軸の指標")
-    cols_y = st.columns(2)
-    y_agg_type_name = cols_y[0].selectbox("集約方法", agg_map.keys(), key="y_agg_type")
-    y_field_display_name = cols_y[1].selectbox("集計対象の列", numeric_fields.keys(), key="y_agg_field", index=None)
-    if y_agg_type_name and y_field_display_name:
-        aggregations.append([agg_map[y_agg_type_name], numeric_fields[y_field_display_name]])
-
-    # X-Axis
+    y_field_display_name = st.selectbox("Y軸の列", numeric_fields.keys(), key="y_axis_field", index=None)
+    
+    # --- X軸の選択 ---
     st.markdown("##### X軸の指標")
-    cols_x = st.columns(2)
-    x_agg_type_name = cols_x[0].selectbox("集約方法", agg_map.keys(), key="x_agg_type")
-    x_field_display_name = cols_x[1].selectbox("集計対象の列", numeric_fields.keys(), key="x_agg_field", index=None)
-    if x_agg_type_name and x_field_display_name:
-        aggregations.append([agg_map[x_agg_type_name], numeric_fields[x_field_display_name]])
+    x_field_display_name = st.selectbox("X軸の列", numeric_fields.keys(), key="x_axis_field", index=None)
 
-    # Breakout
+    # --- グループ化（色分け）の選択 ---
     st.markdown("##### グループ化する列（オプション）")
     field_options = {f['display_name_with_table']: f['mbql_ref'] for f in all_fields}
-    breakout_field_display_name = st.selectbox("グループ化する列", field_options.keys(), index=None, key="scatter_breakout_field_name")
+    breakout_field_display_name = st.selectbox(
+        "グループ化する列（点の色分け）", 
+        field_options.keys(), 
+        index=None, 
+        key="scatter_breakout_field_name"
+    )
+
+    y_axis_ref = numeric_fields.get(y_field_display_name)
+    x_axis_ref = numeric_fields.get(x_field_display_name)
     breakout_field_ref = field_options.get(breakout_field_display_name)
     
-    return aggregations, breakout_field_ref
+    return {"y_axis": y_axis_ref, "x_axis": x_axis_ref}, breakout_field_ref
 
 def display_custom_chart_form():
     """高機能クエリビルダーのUIを表示する"""
@@ -512,16 +542,14 @@ def display_custom_chart_form():
 
         if selections["table_id"]:
             chart_display_name = st.selectbox("2. グラフの種類を選択", CHART_TYPE_MAP.keys(), key="chart_type_selection")
-            st.markdown("---")
-            st.markdown("**テーブル結合**"); display_existing_joins(selections); display_join_builder(selections)
-            st.markdown("---")
-            st.markdown("**フィルター**"); display_existing_filters(selections); display_add_filter_form(selections)
-            st.markdown("---")
-            st.markdown("**データ定義**")
+            st.markdown("---"); st.markdown("**テーブル結合**"); display_existing_joins(selections); display_join_builder(selections)
+            st.markdown("---"); st.markdown("**フィルター**"); display_existing_filters(selections); display_add_filter_form(selections)
+            st.markdown("---"); st.markdown("**データ定義**")
 
+            scatter_axes = None
             if chart_display_name == "散布図":
-                aggregations, breakout_field_ref = display_scatter_plot_form(selections)
-                agg_type_name, agg_field_ref = None, None
+                scatter_axes, breakout_field_ref = display_scatter_plot_form(selections)
+                agg_type_name, agg_field_ref, aggregations = None, None, None
             else:
                 charts_without_breakout = ["数値", "ゲージ"]
                 show_breakout = chart_display_name not in charts_without_breakout
@@ -532,8 +560,12 @@ def display_custom_chart_form():
             if st.button("作成してダッシュボードに追加", type="primary"):
                 agg_map = {"行のカウント": "count", "..の合計": "sum", "..の平均": "avg", "..の異なる値の数": "distinct", "..の累積合計": "cum-sum", "行の累積カウント": "cum-count", "..の標準偏差": "stddev", "..の最小値": "min", "..の最大値": "max"}
                 handle_custom_chart_submission(
-                    chart_display_name=chart_display_name, agg_type=agg_map.get(agg_type_name) if agg_type_name else None,
-                    agg_field_ref=agg_field_ref, breakout_field_ref=breakout_field_ref, aggregations=aggregations
+                    chart_display_name=chart_display_name, 
+                    agg_type=agg_map.get(agg_type_name) if agg_type_name else None,
+                    agg_field_ref=agg_field_ref, 
+                    breakout_field_ref=breakout_field_ref, 
+                    aggregations=aggregations,
+                    scatter_axes=scatter_axes
                 )
 
     if st.button("ビルダーを閉じる"):
