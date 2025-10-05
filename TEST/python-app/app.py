@@ -8,6 +8,7 @@ import torch
 import numpy as np
 from pykeen.triples import TriplesFactory
 from typing import List, Dict, Any, Optional, Tuple
+import plotly.express as px
 
 # --- Metabase & App 設定 ---
 METABASE_SITE_URL = "http://localhost:3000"
@@ -32,10 +33,13 @@ CARD_DISPLAY_TYPE_MAPPING = {
     "sankey": "visual-sankey",
     "object": "visual-object"
 }
+# 逆引き用マッピングを追加
+REVERSE_CARD_DISPLAY_TYPE_MAPPING = {v: k for k, v in CARD_DISPLAY_TYPE_MAPPING.items()}
+
 SIZE_MAPPING = {
-    'S (幅1/3)': {'width': 8, 'height': 4},
-    'M (幅1/2)': {'width': 12, 'height': 5},
-    'L (幅2/3)': {'width': 16, 'height': 6}
+    'S (幅1/3)': {'width': 8, 'height': 5},
+    'M (幅1/2)': {'width': 12, 'height': 10},
+    'L (幅2/3)': {'width': 16, 'height': 10}
 }
 JOIN_STRATEGY_MAP = {
     "左外部結合 (Left Join)": "left-join",
@@ -51,6 +55,7 @@ CHART_TYPE_MAP = {
     "数値": "scalar",
     "ゲージ": "gauge",
     "散布図": "scatter",
+    "ピボットテーブル": "pivot-table",
 }
 
 
@@ -83,6 +88,18 @@ def find_empty_space(dashcards: List[Dict], card_width: int, card_height: int, g
                 return (r, c)
     return (max_row_so_far, 0)
 
+def _deduplicate_columns(column_names: List[str]) -> List[str]:
+    """重複した列名に接尾辞を追加して一意にする"""
+    new_names = []
+    counts = {}
+    for name in column_names:
+        if name in counts:
+            counts[name] += 1
+            new_names.append(f"{name}_{counts[name]}")
+        else:
+            counts[name] = 1
+            new_names.append(name)
+    return new_names
 
 # --- Metabase連携関数 ---
 def get_metabase_session(username, password):
@@ -188,6 +205,22 @@ def add_card_to_dashboard(session_id: str, dashboard_id: str, card_id: int, size
         if e.response: st.error(f"Metabaseからの応答: {e.response.text}")
         return False
 
+def execute_query(session_id: str, dataset_query: Dict[str, Any]) -> Optional[Dict]:
+    """
+    カードを保存せずに、指定された dataset_query を実行して結果を取得する (プレビュー用)
+    """
+    api_url = f"{METABASE_API_URL}/api/dataset"
+    headers = {"X-Metabase-Session": session_id}
+    try:
+        response = requests.post(api_url, headers=headers, json=dataset_query)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"クエリの実行に失敗しました: {e}")
+        if e.response:
+            st.error(f"Metabaseからの応答: {e.response.text}")
+        return None
+
 # --- RotatEモデル用関数 ---
 @st.cache_resource
 def load_kge_model_and_data():
@@ -273,137 +306,28 @@ def handle_table_selection():
     else:
         selections.update({"table_id": None, "table_name": None, "available_fields": [], "filters": [], "joins": []})
 
-def handle_custom_chart_submission(chart_display_name: str, agg_type: Optional[str], breakout_field_ref=None, agg_field_ref=None, aggregations=None, scatter_axes=None):
-    """拡張されたフォーム情報からMBQLペイロードを構築し、APIを呼び出す"""
-    selections = st.session_state.query_builder_selections
-    table_id = selections['table_id']
-    charts_with_breakout = ["棒グラフ", "折れ線グラフ", "エリアグラフ", "円グラフ"]
-
-    # バリデーション
-    if not table_id:
-        st.error("ベースとなるテーブルを選択してください。")
-        return
-    if chart_display_name in charts_with_breakout and not breakout_field_ref:
-        st.error("このグラフの種類には「グループ化する列」の選択が必要です。")
-        return
-    if chart_display_name == "散布図" and (not scatter_axes or not scatter_axes.get("x_axis") or not scatter_axes.get("y_axis")):
-        st.error("散布図にはX軸とY軸、両方の列を設定してください。")
-        return
-        
-    selected_table = next((tbl for tbl in st.session_state.tables_metadata if tbl['id'] == table_id), None)
-    all_fields = get_all_available_fields(selections)
-    
-    # --- MBQLクエリ構築 ---
-    query = {"source-table": table_id}
-
-    if selections["joins"]:
-        query["joins"] = [{
-            "alias": join["join_alias"], "source-table": join["target_table_id"],
-            "condition": join["condition"], "strategy": join["strategy"], "fields": "all"
-        } for join in selections["joins"]]
-
-    visualization_settings = {}
-    if chart_display_name == "散布図":
-        x_axis_ref = scatter_axes["x_axis"]
-        y_axis_ref = scatter_axes["y_axis"]
-
-        # 散布図では集計せず、選択された列をそのまま使う
-        # query["fields"] に軸とグループ化の列を指定する
-        query["fields"] = [x_axis_ref, y_axis_ref]
-        if breakout_field_ref:
-            query["fields"].append(breakout_field_ref)
-
-        # クエリ結果の列名を取得
-        x_field = next((f for f in all_fields if f['mbql_ref'] == x_axis_ref), None)
-        y_field = next((f for f in all_fields if f['mbql_ref'] == y_axis_ref), None)
-        
-        x_col_name = x_field['name'] if x_field else None
-        y_col_name = y_field['name'] if y_field else None
-        
-        if not x_col_name or not y_col_name:
-            st.error("軸の列名を取得できませんでした。")
-            return
-
-        # 資料に基づいた正しい visualization_settings
-        visualization_settings = {
-            "graph.dimensions": [x_col_name],  # X軸
-            "graph.metrics": [y_col_name]     # Y軸
-        }
-        
-        if breakout_field_ref:
-            breakout_field = next((f for f in all_fields if f['mbql_ref'] == breakout_field_ref), None)
-
-    else:
-        field_required_aggs = ["sum", "avg", "distinct", "cum-sum", "stddev", "min", "max"]
-        if agg_type in field_required_aggs:
-            if not agg_field_ref:
-                st.error("この集約方法には集計対象の列が必要です。"); return
-            query["aggregation"] = [[agg_type, agg_field_ref]]
-        else:
-            query["aggregation"] = [[agg_type]]
-    
-    if breakout_field_ref and chart_display_name != "散布図":
-        query["breakout"] = [breakout_field_ref]
-
-    # Filters (変更なし)
-    if selections["filters"]:
-        filter_clauses = []
-        for f in selections["filters"]:
-            op, field_clause = f["operator"], f["field_ref"]
-            if op in ["is-null", "not-null"]: clause = [op, field_clause]
-            elif op == "between":
-                try: v1, v2 = float(f["value1"]), float(f["value2"])
-                except (ValueError, TypeError): st.error(f"フィルター「{f['field_name']}」の範囲指定の値が無効です。"); return
-                clause = [op, field_clause, v1, v2]
-            else:
-                try: value = float(f["value1"])
-                except (ValueError, TypeError): value = f["value1"]
-                clause = [op, field_clause, value]
-            filter_clauses.append(clause)
-        if len(filter_clauses) > 1: query["filter"] = ["and"] + filter_clauses
-        elif filter_clauses: query["filter"] = filter_clauses[0]
-
-    # --- カード名生成ロジックの修正 ---
-    card_name = ""
-    if chart_display_name == "散布図":
-        x_field = next((f for f in all_fields if f['mbql_ref'] == scatter_axes["x_axis"]), None)
-        y_field = next((f for f in all_fields if f['mbql_ref'] == scatter_axes["y_axis"]), None)
-        breakout_field = next((f for f in all_fields if f['mbql_ref'] == breakout_field_ref), None) if breakout_field_ref else None
-        
-        if x_field and y_field:
-            x_name = x_field['display_name']
-            y_name = y_field['display_name']
-            breakout_name = f" ({breakout_field['display_name']}別)" if breakout_field else ""
-            card_name = f"散布図: {y_name} vs {x_name}{breakout_name}"
-    else:
-        agg_field = next((f for f in all_fields if f['mbql_ref'] == agg_field_ref), None) if agg_field_ref else None
-        agg_str = f"の{agg_field['display_name_with_table']}" if agg_field else ""
-        if breakout_field_ref:
-            breakout_field = next((f for f in all_fields if f['mbql_ref'] == breakout_field_ref), None)
-            card_name = f"{chart_display_name}: {breakout_field['display_name_with_table']}別 {st.session_state.agg_type_name}{agg_str}"
-        else:
-            card_name = f"{chart_display_name}: {st.session_state.agg_type_name}{agg_str}"
-
-    # --- APIペイロード作成と実行 ---
-    payload = {
-        "name": card_name,
-        "display": CHART_TYPE_MAP.get(chart_display_name, "table"),
-        "dataset_query": {"type": "query", "database": selected_table['db_id'], "query": query},
-        "visualization_settings": visualization_settings
-    }
-    
+def handle_custom_chart_submission(payload: Dict[str, Any]):
+    """
+    渡されたペイロードを元に、カード作成とダッシュボードへの追加を実行する。
+    """
     dashboard_id = normalize_id(st.session_state.dashboard_id)
+    # カスタムグラフ作成フローでも 'card_size_selection' を参照するように
     card_size = SIZE_MAPPING.get(st.session_state.card_size_selection)
+    
     with st.spinner("グラフを作成中..."):
         card_id = create_card(st.session_state.metabase_session_id, payload)
+    
     if card_id:
         with st.spinner("ダッシュボードに追加中..."):
             success = add_card_to_dashboard(st.session_state.metabase_session_id, dashboard_id, card_id, size_x=card_size['width'], size_y=card_size['height'])
         if success:
-            st.success("ダッシュボードに追加しました！ページを更新します。")
+            st.success("ダッシュボードに追加しました！")
+            # 状態をリセット
             st.session_state.show_custom_chart_form = False
             st.session_state.query_builder_selections = {"table_id": None, "table_name": None, "joins": [], "filters": [], "aggregation": [], "breakout_id": None, "breakout_name": None, "available_fields": []}
-            time.sleep(2); st.rerun()
+            st.session_state.preview_data = None
+            time.sleep(2)
+            st.rerun()
 
 # --- クエリビルダーUIの分割された関数 ---
 
@@ -507,34 +431,135 @@ def display_scatter_plot_form(selections: Dict) -> Tuple[Optional[Dict], Optiona
         if any(t in f.get('base_type', '').lower() for t in ['integer', 'float', 'double', 'decimal']) 
         and f.get('semantic_type') not in ['type/PK', 'type/FK']
     }
-    
-    # --- Y軸の選択 ---
     st.markdown("##### Y軸の指標")
     y_field_display_name = st.selectbox("Y軸の列", numeric_fields.keys(), key="y_axis_field", index=None)
-    
-    # --- X軸の選択 ---
     st.markdown("##### X軸の指標")
     x_field_display_name = st.selectbox("X軸の列", numeric_fields.keys(), key="x_axis_field", index=None)
-
-    # --- グループ化（色分け）の選択 ---
     st.markdown("##### グループ化する列（オプション）")
     field_options = {f['display_name_with_table']: f['mbql_ref'] for f in all_fields}
-    breakout_field_display_name = st.selectbox(
-        "グループ化する列（点の色分け）", 
-        field_options.keys(), 
-        index=None, 
-        key="scatter_breakout_field_name"
-    )
-
+    breakout_field_display_name = st.selectbox("グループ化する列（点の色分け）", field_options.keys(), index=None, key="scatter_breakout_field_name")
     y_axis_ref = numeric_fields.get(y_field_display_name)
     x_axis_ref = numeric_fields.get(x_field_display_name)
     breakout_field_ref = field_options.get(breakout_field_display_name)
-    
     return {"y_axis": y_axis_ref, "x_axis": x_axis_ref}, breakout_field_ref
 
+def display_pivot_table_form(selections: Dict):
+    st.info("ピボットテーブルは、データをクロス集計して表示します。行、列、集計したい値をそれぞれ指定してください。")
+    all_fields = get_all_available_fields(selections)
+    field_options = [f['display_name_with_table'] for f in all_fields]
+    numeric_fields = [f['display_name_with_table'] for f in all_fields if any(t in f.get('base_type', '').lower() for t in ['integer', 'float', 'double', 'decimal']) and f.get('semantic_type') not in ['type/PK', 'type/FK']]
+    
+    selections['pivot_rows'] = st.multiselect("行", field_options, key="pivot_rows_multiselect")
+    selections['pivot_cols'] = st.multiselect("列", field_options, key="pivot_cols_multiselect")
+    
+    # FIX: Change multiselect to selectbox for "values"
+    selected_val = st.selectbox("値", numeric_fields, key="pivot_vals_selectbox", index=None, placeholder="値を選択...")
+    # Wrap the single selection in a list to maintain compatibility with downstream code
+    selections['pivot_vals'] = [selected_val] if selected_val else []
+
+    pivot_agg_options = {
+        "合計": "sum",
+        "平均": "avg",
+        "中央値": "median",
+        "標準偏差": "stddev"
+    }
+    selections['pivot_agg_func_display'] = st.selectbox("集計方法", pivot_agg_options.keys(), key="pivot_agg_selectbox")
+    selections['pivot_agg_func'] = pivot_agg_options[selections['pivot_agg_func_display']]
+
+
 def display_custom_chart_form():
-    """高機能クエリビルダーのUIを表示する"""
+    """高機能クエリビルダーとプレビューダイアログのUIを表示・管理する"""
     selections = st.session_state.query_builder_selections
+
+    # ダイアログの表示ロジック
+    if st.session_state.get('show_preview_dialog', False):
+        @st.dialog("グラフプレビュー")
+        def show_preview():
+            preview_data = st.session_state.preview_data
+            if not preview_data:
+                st.error("プレビューデータの読み込みに失敗しました。")
+                return
+
+            df = preview_data['df']
+            chart_type = preview_data['chart_type']
+            
+            st.subheader("プレビュー")
+            
+            if not df.empty:
+                if len(df.columns) < 1:
+                     st.warning("プレビュー対象の列がありません。")
+                else:
+                    try:
+                        if chart_type in ["bar", "line", "area"]:
+                            if len(df.columns) < 2:
+                                st.warning("グラフを描画するには少なくとも2つの列が必要です。")
+                                st.dataframe(df)
+                            else:
+                                x_col = df.columns[0]
+                                y_cols = list(df.columns[1:])
+                                if chart_type == "bar": st.bar_chart(df, x=x_col, y=y_cols)
+                                elif chart_type == "line": st.line_chart(df, x=x_col, y=y_cols)
+                                elif chart_type == "area": st.area_chart(df, x=x_col, y=y_cols)
+
+                        elif chart_type == "pie":
+                            if len(df.columns) == 2:
+                                fig = px.pie(df, names=df.columns[0], values=df.columns[1], title="円グラフプレビュー")
+                                st.plotly_chart(fig, use_container_width=True)
+                            else:
+                                st.warning("円グラフには、ラベルと値の2つの列が必要です。")
+                                st.dataframe(df)
+
+                        elif chart_type == "scatter":
+                            if len(df.columns) < 2:
+                                st.warning("散布図を描画するには少なくとも2つの列が必要です。")
+                                st.dataframe(df)
+                            else:
+                                x_col = df.columns[0]
+                                y_col = df.columns[1]
+                                st.scatter_chart(df, x=x_col, y=y_col)
+
+                        elif chart_type == "pivot-table":
+                            st.info("ピボットテーブルプレビュー")
+                            try:
+                                # FIX: Use pd.pivot_table instead of df.pivot for multiple values support
+                                pivoted_df = pd.pivot_table(
+                                    df,
+                                    index=preview_data.get('pivot_row_names', []),
+                                    columns=preview_data.get('pivot_col_names', []),
+                                    values=preview_data.get('pivot_val_names', [])
+                                )
+                                st.dataframe(pivoted_df)
+                            except Exception as e:
+                                st.error(f"ピボットテーブルの作成に失敗しました: {e}")
+                                st.write("変換前のデータ:")
+                                st.dataframe(df)
+                        else:
+                            st.info("このグラフ種別のプレビューは現在サポートされていません。データテーブルを表示します。")
+                            st.dataframe(df)
+                    except Exception as e:
+                        st.error(f"グラフの描画に失敗しました: {e}")
+                        st.dataframe(df)
+            else:
+                st.info("クエリは成功しましたが、結果は0件でした。")
+
+            st.markdown("---")
+            st.write("このグラフをダッシュボードに追加しますか？")
+            
+            col1, col2, _ = st.columns([1, 1, 2])
+            with col1:
+                if st.button("はい、追加します", type="primary", use_container_width=True):
+                    st.session_state.show_preview_dialog = False
+                    handle_custom_chart_submission(st.session_state.preview_data['final_payload'])
+                    st.rerun() 
+            with col2:
+                if st.button("いいえ、戻ります", use_container_width=True):
+                    st.session_state.show_preview_dialog = False
+                    st.rerun()
+        
+        show_preview()
+
+
+    # クエリビルダー本体のUI
     with st.container(border=True):
         st.subheader("クエリビルダー")
         table_options = {tbl['display_name']: tbl['id'] for tbl in st.session_state.tables_metadata}
@@ -546,31 +571,155 @@ def display_custom_chart_form():
             st.markdown("---"); st.markdown("**フィルター**"); display_existing_filters(selections); display_add_filter_form(selections)
             st.markdown("---"); st.markdown("**データ定義**")
 
-            scatter_axes = None
+            scatter_axes, breakout_field_ref, agg_type_name, agg_field_ref = None, None, None, None
             if chart_display_name == "散布図":
                 scatter_axes, breakout_field_ref = display_scatter_plot_form(selections)
-                agg_type_name, agg_field_ref, aggregations = None, None, None
+            elif chart_display_name == "ピボットテーブル":
+                display_pivot_table_form(selections)
             else:
                 charts_without_breakout = ["数値", "ゲージ"]
                 show_breakout = chart_display_name not in charts_without_breakout
                 agg_type_name, agg_field_ref, breakout_field_ref = display_aggregation_breakout_form(selections, show_breakout=show_breakout)
-                aggregations = None
 
             st.markdown("---")
-            if st.button("作成してダッシュボードに追加", type="primary"):
+            
+            st.selectbox('カードサイズを選択', list(SIZE_MAPPING.keys()), key='card_size_selection')
+
+            if st.button("プレビューして作成...", type="primary"):
+                selections = st.session_state.query_builder_selections
+                table_id = selections['table_id']
+                selected_table = next((tbl for tbl in st.session_state.tables_metadata if tbl['id'] == table_id), None)
+                all_fields = get_all_available_fields(selections)
+                
+                query = {"source-table": table_id}
+                if selections["joins"]: query["joins"] = [{ "alias": join["join_alias"], "source-table": join["target_table_id"], "condition": join["condition"], "strategy": join["strategy"], "fields": "all" } for join in selections["joins"]]
+                if selections["filters"]:
+                    filter_clauses = []
+                    for f in selections["filters"]:
+                        op, field_clause = f["operator"], f["field_ref"]
+                        if op in ["is-null", "not-null"]: clause = [op, field_clause]
+                        elif op == "between":
+                            try: v1, v2 = float(f["value1"]), float(f["value2"])
+                            except (ValueError, TypeError): st.error(f"フィルター「{f['field_name']}」の範囲指定の値が無効です。"); return
+                            clause = [op, field_clause, v1, v2]
+                        else:
+                            try: value = float(f["value1"])
+                            except (ValueError, TypeError): value = f["value1"]
+                            clause = [op, field_clause, value]
+                        filter_clauses.append(clause)
+                    if len(filter_clauses) > 1: query["filter"] = ["and"] + filter_clauses
+                    elif filter_clauses: query["filter"] = filter_clauses[0]
+                
                 agg_map = {"行のカウント": "count", "..の合計": "sum", "..の平均": "avg", "..の異なる値の数": "distinct", "..の累積合計": "cum-sum", "行の累積カウント": "cum-count", "..の標準偏差": "stddev", "..の最小値": "min", "..の最大値": "max"}
-                handle_custom_chart_submission(
-                    chart_display_name=chart_display_name, 
-                    agg_type=agg_map.get(agg_type_name) if agg_type_name else None,
-                    agg_field_ref=agg_field_ref, 
-                    breakout_field_ref=breakout_field_ref, 
-                    aggregations=aggregations,
-                    scatter_axes=scatter_axes
-                )
+                agg_type = agg_map.get(agg_type_name) if agg_type_name else None
+                
+                preview_extras = {}
+
+                if chart_display_name == "散布図":
+                    x_ref, y_ref = scatter_axes["x_axis"], scatter_axes["y_axis"]
+                    if not x_ref or not y_ref: st.error("散布図にはX軸とY軸の両方を選択してください。"); return
+                    query["fields"] = [x_ref, y_ref]
+                    if breakout_field_ref: query["fields"].append(breakout_field_ref)
+                elif chart_display_name == "ピボットテーブル":
+                    pivot_rows_names = selections.get('pivot_rows', [])
+                    pivot_cols_names = selections.get('pivot_cols', [])
+                    pivot_vals_names = selections.get('pivot_vals', [])
+                    if not pivot_rows_names or not pivot_vals_names:
+                        st.error("ピボットテーブルには少なくとも「行」と「値」が必要です。"); return
+                    
+                    field_name_map = {f['display_name_with_table']: f['mbql_ref'] for f in all_fields}
+                    row_refs = [field_name_map[name] for name in pivot_rows_names]
+                    col_refs = [field_name_map[name] for name in pivot_cols_names]
+                    val_refs = [field_name_map[name] for name in pivot_vals_names]
+                    
+                    mbql_agg_func = selections.get('pivot_agg_func', 'sum')
+                    query["breakout"] = row_refs + col_refs
+                    query["aggregation"] = [[mbql_agg_func, ref] for ref in val_refs]
+                    preview_extras['pivot_agg_func'] = mbql_agg_func
+
+                else:
+                    if agg_type:
+                        field_req_aggs = ["sum", "avg", "distinct", "cum-sum", "stddev", "min", "max"]
+                        if agg_type in field_req_aggs: 
+                            if not agg_field_ref: st.error("この集約方法には集計対象の列が必要です。"); return
+                            query["aggregation"] = [[agg_type, agg_field_ref]]
+                        else: query["aggregation"] = [[agg_type]]
+                if breakout_field_ref and chart_display_name not in ["散布図", "ピボットテーブル"]: 
+                    query["breakout"] = [breakout_field_ref]
+                
+                dataset_query = {"type": "query", "database": selected_table['db_id'], "query": query}
+                
+                with st.spinner("プレビューデータを取得中..."):
+                    result = execute_query(st.session_state.metabase_session_id, dataset_query)
+                
+                if result and result.get('status') == 'completed':
+                    result_cols = result['data']['cols']
+                    display_names = [c['display_name'] for c in result_cols]
+                    internal_names = [c['name'] for c in result_cols]
+                    unique_display_names = _deduplicate_columns(display_names)
+                    df = pd.DataFrame(result['data']['rows'], columns=unique_display_names)
+                    
+                    if chart_display_name == "ピボットテーブル":
+                        num_rows = len(selections.get('pivot_rows', []))
+                        num_cols = len(selections.get('pivot_cols', []))
+                        preview_extras['pivot_row_names'] = list(df.columns[:num_rows])
+                        preview_extras['pivot_col_names'] = list(df.columns[num_rows : num_rows + num_cols])
+                        preview_extras['pivot_val_names'] = list(df.columns[num_rows + num_cols :])
+
+                    viz_settings = {}
+                    card_name = ""
+                    if chart_display_name == "散布図":
+                        if len(internal_names) >= 2: viz_settings = {"graph.dimensions": [internal_names[0]], "graph.metrics": [internal_names[1]]}
+                        x_field = next((f for f in all_fields if f['mbql_ref'] == scatter_axes["x_axis"]), None)
+                        y_field = next((f for f in all_fields if f['mbql_ref'] == scatter_axes["y_axis"]), None)
+                        breakout_field = next((f for f in all_fields if f['mbql_ref'] == breakout_field_ref), None) if breakout_field_ref else None
+                        if x_field and y_field:
+                            x_name, y_name = x_field['display_name'], y_field['display_name']
+                            breakout_name = f" ({breakout_field['display_name']}別)" if breakout_field else ""
+                            card_name = f"散布図: {y_name} vs {x_name}{breakout_name}"
+                    elif chart_display_name == "ピボットテーブル":
+                        rows_str = ", ".join(selections.get('pivot_rows', []))
+                        vals_str = ", ".join(selections.get('pivot_vals', []))
+                        agg_str = selections.get('pivot_agg_func_display', '合計')
+                        card_name = f"ピボット: {rows_str} 別 {vals_str}の{agg_str}"
+                        
+                        # FIX: Create map from unique_display_names to internal_names to prevent KeyError
+                        display_to_internal_map = {unique_name: internal_name for unique_name, internal_name in zip(unique_display_names, internal_names)}
+
+                        # FIX: Use a nested dictionary structure for pivot_table settings
+                        viz_settings = {
+                            "pivot_table": {
+                                "columns": [display_to_internal_map[name] for name in preview_extras.get('pivot_col_names', [])],
+                                "rows": [display_to_internal_map[name] for name in preview_extras.get('pivot_row_names', [])],
+                                "values": [display_to_internal_map[name] for name in preview_extras.get('pivot_val_names', [])]
+                            }
+                        }
+                    else:
+                        agg_field = next((f for f in all_fields if f['mbql_ref'] == agg_field_ref), None) if agg_field_ref else None
+                        agg_str = f"の{agg_field['display_name_with_table']}" if agg_field else ""
+                        if breakout_field_ref:
+                            breakout_field = next((f for f in all_fields if f['mbql_ref'] == breakout_field_ref), None)
+                            card_name = f"{chart_display_name}: {breakout_field['display_name_with_table']}別 {agg_type_name}{agg_str}"
+                        else:
+                            card_name = f"{chart_display_name}: {agg_type_name}{agg_str}"
+
+                    final_payload = {
+                        "name": card_name,
+                        "display": CHART_TYPE_MAP.get(chart_display_name),
+                        "dataset_query": dataset_query,
+                        "visualization_settings": viz_settings
+                    }
+                    
+                    st.session_state.preview_data = {'df': df, 'chart_type': CHART_TYPE_MAP.get(chart_display_name), 'final_payload': final_payload, **preview_extras}
+                    st.session_state.show_preview_dialog = True
+                    st.rerun()
+                else:
+                    st.error("プレビューデータの取得に失敗しました。")
 
     if st.button("ビルダーを閉じる"):
         st.session_state.show_custom_chart_form = False
         st.session_state.query_builder_selections = {"table_id": None, "table_name": None, "joins": [], "filters": [], "aggregation": [], "breakout_id": None, "breakout_name": None, "available_fields": []}
+        st.session_state.preview_data = None
         st.rerun()
 
 def display_credentials_form():
@@ -592,8 +741,82 @@ def embed_dashboard():
     iframe_url = f"{METABASE_SITE_URL}/embed/dashboard/{token}#bordered=true&titled=true"
     st.components.v1.iframe(iframe_url, height=800, scrolling=True)
 
+# --- NEW: Recommendation Integration ---
+def display_recommendation_card_creator():
+    """推薦されたビューをダッシュボードに追加するためのダイアログを表示する"""
+    
+    selected_view = st.session_state.selected_recommendation
+    clean_name = selected_view.replace('visual-', '').replace('Chart', ' Chart').title()
+
+    @st.dialog(f"推薦グラフ「{clean_name}」を作成")
+    def card_creator_dialog():
+        selections = st.session_state.query_builder_selections
+        
+        st.info(f"ダッシュボードに「{clean_name}」を追加します。以下の項目を選択してください。")
+
+        # 1. ベーステーブルの選択
+        table_options = {tbl['display_name']: tbl['id'] for tbl in st.session_state.tables_metadata}
+        st.selectbox(
+            "1. ベースとなるテーブルを選択", 
+            table_options.keys(), 
+            index=list(table_options.keys()).index(selections["table_name"]) if selections.get("table_name") else None, 
+            on_change=handle_table_selection, 
+            key="selected_table_name_key", 
+            placeholder="テーブルを選択..."
+        )
+
+        if selections.get("table_id"):
+            selected_table = next((tbl for tbl in st.session_state.tables_metadata if tbl['id'] == selections['table_id']), None)
+            st.markdown("---")
+            st.markdown("2. データ定義")
+            
+            agg_type_name, agg_field_ref, breakout_field_ref = display_aggregation_breakout_form(selections, show_breakout=True)
+            
+            st.markdown("---")
+            st.selectbox('3. カードサイズを選択', list(SIZE_MAPPING.keys()), key='card_size_selection')
+
+            if st.button("作成してダッシュボードに追加", type="primary"):
+                if not breakout_field_ref:
+                    st.error("このグラフには「グループ化する列」が必要です。")
+                    return
+
+                query = {"source-table": selections['table_id']}
+                
+                agg_map = {"行のカウント": "count", "..の合計": "sum", "..の平均": "avg", "..の異なる値の数": "distinct", "..の累積合計": "cum-sum", "行の累積カウント": "cum-count", "..の標準偏差": "stddev", "..の最小値": "min", "..の最大値": "max"}
+                agg_type = agg_map.get(agg_type_name)
+                if agg_type:
+                    if agg_field_ref:
+                        query["aggregation"] = [[agg_type, agg_field_ref]]
+                    else:
+                        query["aggregation"] = [[agg_type]]
+
+                query["breakout"] = [breakout_field_ref]
+
+                dataset_query = {"type": "query", "database": selected_table['db_id'], "query": query}
+                
+                all_fields = get_all_available_fields(selections)
+                breakout_field = next((f for f in all_fields if f['mbql_ref'] == breakout_field_ref), None)
+                card_name = f"推薦: {clean_name} ({breakout_field['display_name_with_table']}別)" if breakout_field else f"推薦: {clean_name}"
+                
+                display_type = REVERSE_CARD_DISPLAY_TYPE_MAPPING.get(selected_view, "bar")
+
+                final_payload = {
+                    "name": card_name,
+                    "display": display_type,
+                    "dataset_query": dataset_query,
+                    "visualization_settings": {}
+                }
+                
+                handle_custom_chart_submission(final_payload)
+                st.session_state.show_recommendation_dialog = False
+                st.rerun()
+
+    card_creator_dialog()
+
+
 def main():
     st.set_page_config(layout="wide"); st.title("ダッシュボードビュー推薦システム (RotatE版)")
+    # --- Session State Initialization ---
     if 'metabase_session_id' not in st.session_state: st.session_state.metabase_session_id = None
     if 'dashboard_id' not in st.session_state: st.session_state.dashboard_id = ""
     if 'secret_key' not in st.session_state: st.session_state.secret_key = ""
@@ -603,19 +826,34 @@ def main():
     if 'tables_metadata' not in st.session_state: st.session_state.tables_metadata = None
     if 'query_builder_selections' not in st.session_state:
         st.session_state.query_builder_selections = {"table_id": None, "table_name": None, "joins": [], "filters": [], "aggregation": [], "breakout_id": None, "breakout_name": None, "available_fields": []}
+    if 'preview_data' not in st.session_state: st.session_state.preview_data = None
+    if 'show_preview_dialog' not in st.session_state: st.session_state.show_preview_dialog = False
+    # --- New Session State for Recommendations ---
+    if 'recommendations' not in st.session_state: st.session_state.recommendations = None
+    if 'selected_recommendation' not in st.session_state: st.session_state.selected_recommendation = None
+    if 'show_recommendation_dialog' not in st.session_state: st.session_state.show_recommendation_dialog = False
 
-    if st.session_state.metabase_session_id is None: display_credentials_form()
+    if st.session_state.metabase_session_id is None: 
+        display_credentials_form()
     else:
+        if 'card_size_selection' not in st.session_state:
+            st.session_state.card_size_selection = list(SIZE_MAPPING.keys())[0]
+
         embed_dashboard()
+        
         st.header("データベースメタデータ")
         if st.button("Sample Databaseのテーブル一覧とメタデータを取得"):
             ids = get_db_and_table_ids(st.session_state.metabase_session_id)
             if ids and 'db_id' in ids:
                 with st.spinner("テーブル情報を取得中..."):
                     st.session_state.tables_metadata = get_all_tables_metadata(st.session_state.metabase_session_id, ids['db_id'])
-                if st.session_state.tables_metadata: st.success(f"'{len(st.session_state.tables_metadata)}' 個のテーブルが見つかりました。")
-                else: st.warning("テーブルが見つかりませんでした。")
-            else: st.error("データベースIDの取得に失敗したため、処理を中断しました。")
+                if st.session_state.tables_metadata: 
+                    st.success(f"'{len(st.session_state.tables_metadata)}' 個のテーブルが見つかりました。")
+                else: 
+                    st.warning("テーブルが見つかりませんでした。")
+            else: 
+                st.error("データベースIDの取得に失敗したため、処理を中断しました。")
+        
         st.header("カスタムグラフ作成")
         if st.button("📊 新しいグラフを対話的に作成する"):
             if st.session_state.tables_metadata is None:
@@ -623,44 +861,84 @@ def main():
                 if ids and 'db_id' in ids:
                     with st.spinner("テーブル情報を読み込んでいます..."):
                         st.session_state.tables_metadata = get_all_tables_metadata(st.session_state.metabase_session_id, ids['db_id'])
-            st.session_state.show_custom_chart_form = True; st.rerun()
-        if st.session_state.show_custom_chart_form: display_custom_chart_form()
+            st.session_state.show_custom_chart_form = True
+            st.rerun()
+
+        if st.session_state.show_custom_chart_form: 
+            display_custom_chart_form()
+        
+        st.divider()
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.info("💡 ダッシュボードにグラフを追加・削除した後は、下のボタンを押して推薦内容を更新してください。")
+        with col2:
+            if st.button("🔄 推薦を更新する", use_container_width=True):
+                if 'recommendations' in st.session_state:
+                    del st.session_state.recommendations
+                st.rerun()
+
         st.header("ビュー推薦")
         dashboard_id = normalize_id(st.session_state.dashboard_id)
         if dashboard_id:
             dashboard_details = get_dashboard_details(st.session_state.metabase_session_id, dashboard_id)
             if dashboard_details:
-                dashcards = dashboard_details.get("dashcards", [])
+                dashcards = dashboard_details.get("dashcards", []) + dashboard_details.get("tabs", [{}])[0].get("dashcards", [])
                 st.write("現在のダッシュボードに含まれるビュータイプ:")
                 card_views = [dashcard.get("card", {}).get("display") for dashcard in dashcards if dashcard.get("card")]
-                current_views = [view for view in [CARD_DISPLAY_TYPE_MAPPING.get(v) for v in card_views] if view is not None]
+                current_views = list(set([view for view in [CARD_DISPLAY_TYPE_MAPPING.get(v) for v in card_views] if view is not None]))
                 st.json(current_views)
+
                 if st.button("このダッシュボードにおすすめのビューを生成"):
                     if current_views:
                         with st.spinner("RotatEモデルで推薦を生成中..."):
-                            recommendations = get_recommendations_from_kge(context_views=current_views, top_k=10)
-                        if recommendations: st.success("おすすめのビューが見つかりました！"); st.write(recommendations)
-                        else: st.info("推薦できるビューはありませんでした。")
-                    else: st.warning("推薦の基となるビューがダッシュボードにありません。")
+                            recommendations = get_recommendations_from_kge(context_views=current_views, top_k=5)
+                        if recommendations:
+                            st.success("おすすめのビューが見つかりました！")
+                            st.session_state.recommendations = recommendations
+                            st.rerun()
+                        else:
+                            st.info("推薦できるビューはありませんでした。")
+                    else:
+                        st.warning("推薦の基となるビューがダッシュボードにありません。")
+                
+                if st.session_state.recommendations:
+                    st.write("クリックしてグラフを作成・追加:")
+                    cols = st.columns(len(st.session_state.recommendations))
+                    for i, rec_view in enumerate(st.session_state.recommendations):
+                        clean_name = rec_view.replace('visual-', '').replace('Chart', ' Chart').title()
+                        if cols[i].button(clean_name, key=f"rec_{rec_view}", use_container_width=True):
+                            st.session_state.selected_recommendation = rec_view
+                            st.session_state.show_recommendation_dialog = True
+                            st.rerun()
+
+        if st.session_state.get('show_recommendation_dialog', False):
+            if st.session_state.tables_metadata is None:
+                st.warning("先に「Sample Databaseのテーブル一覧とメタデータを取得」ボタンを押して、テーブル情報を読み込んでください。")
+            else:
+                display_recommendation_card_creator()
+
         st.header("サンプルチャート作成＆ダッシュボードに追加")
-        st.selectbox('追加するカードのサイズを選択してください', list(SIZE_MAPPING.keys()), key='card_size_selection')
+        
+        st.selectbox('追加するカードのサイズを選択してください', list(SIZE_MAPPING.keys()), key='card_size_selection_sample')
+
         ids = get_db_and_table_ids(st.session_state.metabase_session_id)
         if ids:
             col1, col2 = st.columns(2)
+            card_size = SIZE_MAPPING.get(st.session_state.card_size_selection_sample)
             if col1.button("棒グラフを作成＆追加"):
-                card_size = SIZE_MAPPING.get(st.session_state.card_size_selection)
                 payload = {"name": f"Sample Bar Chart - {int(time.time())}", "display": "bar", "dataset_query": {"type": "query", "database": ids['db_id'], "query": {"source-table": ids['table_id'], "aggregation": [["count"]], "breakout": [["field", ids['country_field_id'], None]]}}, "visualization_settings": {}}
                 with st.spinner("作成中..."):
                     card_id = create_card(st.session_state.metabase_session_id, payload)
-                    if card_id: success = add_card_to_dashboard(st.session_state.metabase_session_id, dashboard_id, card_id, size_x=card_size['width'], size_y=card_size['height'])
-                    if card_id and success: st.success("追加しました！"); time.sleep(2); st.rerun()
+                    if card_id: 
+                        success = add_card_to_dashboard(st.session_state.metabase_session_id, dashboard_id, card_id, size_x=card_size['width'], size_y=card_size['height'])
+                        if success: st.success("追加しました！"); time.sleep(2); st.rerun()
             if col2.button("円グラフを作成＆追加"):
-                card_size = SIZE_MAPPING.get(st.session_state.card_size_selection)
                 payload = {"name": f"Sample Pie Chart - {int(time.time())}", "display": "pie", "dataset_query": {"type": "query", "database": ids['db_id'], "query": {"source-table": ids['table_id'], "aggregation": [["count"]], "breakout": [["field", ids['plan_field_id'], None]]}}, "visualization_settings": {}}
                 with st.spinner("作成中..."):
                     card_id = create_card(st.session_state.metabase_session_id, payload)
-                    if card_id: success = add_card_to_dashboard(st.session_state.metabase_session_id, dashboard_id, card_id, size_x=card_size['width'], size_y=card_size['height'])
-                    if card_id and success: st.success("追加しました！"); time.sleep(2); st.rerun()
+                    if card_id:
+                        success = add_card_to_dashboard(st.session_state.metabase_session_id, dashboard_id, card_id, size_x=card_size['width'], size_y=card_size['height'])
+                        if success: st.success("追加しました！"); time.sleep(2); st.rerun()
 
 if __name__ == '__main__':
     main()
