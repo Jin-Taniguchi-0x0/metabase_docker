@@ -9,6 +9,9 @@ import numpy as np
 from pykeen.triples import TriplesFactory
 from typing import List, Dict, Any, Optional, Tuple
 import plotly.express as px
+from datetime import datetime
+import json
+from streamlit_session_browser_storage import SessionStorage
 
 # --- Metabase & App 設定 ---
 METABASE_SITE_URL = "http://localhost:3000"
@@ -108,6 +111,28 @@ def _deduplicate_columns(column_names: List[str]) -> List[str]:
             counts[name] = 1
             new_names.append(name)
     return new_names
+
+# --- 2. ログ関数を TypeError が出ないよう修正 ---
+def add_log_entry(action: str, details: Dict):
+    """
+    操作ログをブラウザの sessionStorage に追加する (streamlit-browser-session-storage を使用)
+    """
+    ss = SessionStorage() # ライブラリのインスタンスを作成
+    
+    # .getItem() はキーワード引数(key=)を取らない
+    log = ss.getItem('operation_log') 
+    if log is None:
+        log = []
+    
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "action": action,
+        **details
+    }
+    log.append(entry)
+    # *** ここを修正 ***
+    ss.setItem('operation_log', log) # .setItem() もキーワード引数(key=, value=)を取らない
+    print(f"LOG: {entry}")
 
 # --- Metabase連携関数 ---
 def get_metabase_session(username, password):
@@ -211,6 +236,56 @@ def add_card_to_dashboard(session_id: str, dashboard_id: str, card_id: int, size
     except requests.exceptions.RequestException as e:
         st.error(f"カードのダッシュボードへの追加に失敗しました: {e}")
         if e.response: st.error(f"Metabaseからの応答: {e.response.text}")
+        return False
+
+def remove_card_from_dashboard(session_id: str, dashboard_id: str, dashcard_id_to_remove: int) -> bool:
+    """
+    指定されたダッシュボードから、指定された dashcard_id を持つカードを削除する。
+    """
+    dashboard_api_url = f"{METABASE_API_URL}/api/dashboard/{dashboard_id}"
+    headers = {"X-Metabase-Session": session_id}
+    
+    try:
+        # 1. 現在のダッシュボード情報を取得
+        get_response = requests.get(dashboard_api_url, headers=headers)
+        get_response.raise_for_status()
+        dashboard_data = get_response.json()
+
+        # 2. タブの有無を判定し、操作対象の dashcards リストを特定
+        has_tabs = "tabs" in dashboard_data and isinstance(dashboard_data.get("tabs"), list) and len(dashboard_data["tabs"]) > 0
+        
+        if has_tabs:
+            target_tab = dashboard_data["tabs"][0]
+            dashcards_list = target_tab.get("dashcards", [])
+        else:
+            dashcards_list = dashboard_data.get('dashcards', [])
+
+        # 3. 削除対象のカードを除外した新しいリストを作成
+        original_count = len(dashcards_list)
+        new_dashcards_list = [card for card in dashcards_list if card.get("id") != dashcard_id_to_remove]
+        
+        if len(new_dashcards_list) == original_count:
+            # 該当するカードが見つからなかった
+            st.warning(f"ID {dashcard_id_to_remove} のカードがダッシュボード上に見つかりません。")
+            return False
+
+        # 4. 更新用ペイロードを作成
+        update_payload = {"name": dashboard_data.get("name"), "description": dashboard_data.get("description")}
+        if has_tabs:
+            target_tab["dashcards"] = new_dashcards_list
+            update_payload["tabs"] = dashboard_data["tabs"]
+        else:
+            update_payload["dashcards"] = new_dashcards_list
+
+        # 5. ダッシュボード情報をPUTで更新
+        put_response = requests.put(dashboard_api_url, headers=headers, json=update_payload)
+        put_response.raise_for_status()
+        return True
+
+    except requests.exceptions.RequestException as e:
+        st.error(f"カードのダッシュボードからの削除に失敗しました: {e}")
+        if e.response: 
+            st.error(f"Metabaseからの応答: {e.response.text}")
         return False
 
 def execute_query(session_id: str, dataset_query: Dict[str, Any]) -> Optional[Dict]:
@@ -330,10 +405,34 @@ def handle_custom_chart_submission(payload: Dict[str, Any], size_key: str):
             success = add_card_to_dashboard(st.session_state.metabase_session_id, dashboard_id, card_id, size_x=card_size['width'], size_y=card_size['height'])
         if success:
             st.success("ダッシュボードに追加しました！")
+
+            # --- ログ収集 (タスク完了) ---
+            task_duration = time.time() - st.session_state.task_start_time if st.session_state.task_start_time else None
+            log_details = {
+                "card_name": payload['name'],
+                "card_type": payload['display'],
+                "task_duration_sec": task_duration
+            }
+            
+            # 推薦から作成された場合、詳細を追加
+            if st.session_state.pending_recommendation:
+                log_details["recommendation_source"] = "recommendation"
+                log_details.update(st.session_state.pending_recommendation)
+            else:
+                log_details["recommendation_source"] = "custom"
+            
+            add_log_entry("create_view", log_details)
+            # --- ログ収集ここまで ---
+
             # 状態をリセット
             st.session_state.show_builder_dialog = False
             st.session_state.custom_builder_selections = {"table_id": None, "table_name": None, "joins": [], "filters": [], "aggregation": [], "breakout_id": None, "breakout_name": None, "available_fields": [], 'chart_display_name': None}
             st.session_state.preview_data = None
+            st.session_state.task_start_time = None # タイマーリセット
+            st.session_state.pending_recommendation = None # 推薦情報リセット
+            
+            if 'recommendations' in st.session_state:
+                del st.session_state.recommendations
             time.sleep(2)
             st.rerun()
 
@@ -482,7 +581,8 @@ def display_custom_chart_form():
     # --- FLOW CHANGE: Step 1 - Select Graph Type ---
     chart_type_options = list(CHART_TYPE_MAP.keys())
     current_chart_display_name = selections.get('chart_display_name')
-    current_chart_index = chart_type_options.index(current_chart_display_name) if current_chart_display_name in chart_type_options else 0
+    
+    current_chart_index = chart_type_options.index(current_chart_display_name) if current_chart_display_name in chart_type_options else None
     
     def on_chart_type_change():
         st.session_state.custom_builder_selections['chart_display_name'] = st.session_state[f"{key_prefix}chart_type_selection"]
@@ -725,7 +825,7 @@ def display_custom_chart_form():
         st.markdown("---")
         if st.button("作成してダッシュボードに追加", type="primary", key=f"{key_prefix}add_to_dashboard_button"):
             handle_custom_chart_submission(st.session_state.preview_data['final_payload'], size_key=f"{key_prefix}card_size_selection")
-            st.rerun()
+            # st.rerun() # handle_custom_chart_submission の中で rerun される
 
 def display_credentials_form():
     st.header("Metabase 認証情報")
@@ -763,6 +863,13 @@ def main():
         st.session_state.custom_builder_selections = {"table_id": None, "table_name": None, "joins": [], "filters": [], "aggregation": [], "breakout_id": None, "breakout_name": None, "available_fields": [], 'chart_display_name': None}
     if 'preview_data' not in st.session_state: st.session_state.preview_data = None
     if 'recommendations' not in st.session_state: st.session_state.recommendations = None
+    
+    # --- 3. ログ機能の初期化 (operation_log のみ削除) ---
+    if 'task_start_time' not in st.session_state:
+        st.session_state.task_start_time = None
+    if 'pending_recommendation' not in st.session_state:
+        st.session_state.pending_recommendation = None
+    # --- ここまで ---
 
     if st.session_state.metabase_session_id is None: 
         display_credentials_form()
@@ -782,15 +889,6 @@ def main():
         with st.container(border=True):
             st.header("ビュー推薦")
             
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.info("💡 ダッシュボードにグラフを追加・削除した後は、「推薦を更新する」ボタンを押してください。")
-            with col2:
-                if st.button("🔄 推薦を更新する", use_container_width=True):
-                    if 'recommendations' in st.session_state:
-                        del st.session_state.recommendations
-                    st.rerun()
-
             st.markdown("---")
             
             dashboard_id = normalize_id(st.session_state.dashboard_id)
@@ -804,31 +902,87 @@ def main():
                         tab_dashcards = tabs[0].get("dashcards", [])
                     dashcards = top_level_dashcards + tab_dashcards
 
-                    current_views = list(set([view for view in [CARD_DISPLAY_TYPE_MAPPING.get(d.get("card", {}).get("display")) for d in dashcards if d.get("card")] if view is not None]))
+                    # --- ビュー削除機能のUI ---
+                    current_views_types = list(set([view for view in [CARD_DISPLAY_TYPE_MAPPING.get(d.get("card", {}).get("display")) for d in dashcards if d.get("card")] if view is not None]))
                     
                     st.write("**現在のダッシュボードのビュー:**")
-                    if current_views:
-                        st.json(current_views)
-                    else:
-                        st.text("（ビューはありません）")
                     
-                    if st.button("このダッシュボードにおすすめのビューを生成"):
-                        if current_views:
+                    valid_dashcards = [dc for dc in dashcards if dc.get("card")]
+
+                    if not valid_dashcards:
+                            st.text("（ビューはありません）")
+                    else:
+                        delete_cols = st.columns(3) 
+                        col_index = 0
+                        
+                        for dashcard in valid_dashcards:
+                            
+                            card_name = dashcard.get("card", {}).get("name", "名称未設定")
+                            dashcard_id = dashcard.get("id")
+                            
+                            with delete_cols[col_index % 3]:
+                                with st.container(border=True):
+                                    st.markdown(f"**{card_name}**")
+                                    
+                                    if st.button("🗑️ 削除", key=f"delete_dashcard_{dashcard_id}", use_container_width=True):
+                                        
+                                        log_details = {"card_name": card_name, "dashcard_id": dashcard_id}
+                                        task_start = time.time()
+                                        
+                                        with st.spinner("カードを削除中..."):
+                                            success = remove_card_from_dashboard(
+                                                st.session_state.metabase_session_id, 
+                                                dashboard_id, 
+                                                dashcard_id
+                                            )
+                                        
+                                        task_duration = time.time() - task_start
+                                        
+                                        if success:
+                                            log_details["task_duration_sec"] = task_duration
+                                            add_log_entry("delete_view", log_details)
+                                            
+                                            st.success("カードを削除しました。")
+                                            if 'recommendations' in st.session_state:
+                                                del st.session_state.recommendations
+                                            time.sleep(1) 
+                                            st.rerun() 
+                                        else:
+                                            st.error("カードの削除に失敗しました。")
+                            
+                            col_index += 1
+                    # --- ビュー削除機能のUIここまで ---
+
+                    
+                    # --- 推薦生成ログ ---
+                    if st.session_state.recommendations is None:
+                        if current_views_types: 
+                            log_details = {"current_views": current_views_types} 
+                            task_start = time.time() 
+                            
                             with st.spinner("RotatEモデルで推薦を生成中..."):
-                                recommendations = get_recommendations_from_kge(context_views=current_views, top_k=5)
+                                recommendations = get_recommendations_from_kge(context_views=current_views_types, top_k=5)
+                            
+                            task_duration = time.time() - task_start 
+                            
+                            log_details["recommendations"] = recommendations
+                            log_details["task_duration_sec"] = task_duration
+                            
+                            add_log_entry("generate_recommendations", log_details)
+
                             if recommendations:
-                                st.success("おすすめのビューが見つかりました！")
                                 st.session_state.recommendations = recommendations
-                                st.rerun()
+                                st.rerun() 
                             else:
                                 st.info("推薦できるビューはありませんでした。")
+                                st.session_state.recommendations = [] 
                         else:
                             st.warning("推薦の基となるビューがダッシュボードにありません。")
+                            st.session_state.recommendations = [] 
                     
                     # --- UNIFIED CREATE FLOW ---
                     st.write("**グラフ作成:**")
                     
-                    # Display recommendations if they exist
                     if st.session_state.recommendations:
                         rec_cols = len(st.session_state.recommendations)
                         cols = st.columns(rec_cols + 1)
@@ -840,29 +994,80 @@ def main():
                                     clean_name = rec_view.replace('visual-', '').replace('Chart', ' Chart').title()
                                     st.markdown(f"<h3 style='text-align: center;'>{icon}</h3>", unsafe_allow_html=True)
                                     st.markdown(f"<p style='text-align: center; font-weight: bold;'>{clean_name}</p>", unsafe_allow_html=True)
+                                    
+                                    # --- タスク開始ログ ---
                                     if st.button("作成", key=f"rec_{rec_view}", use_container_width=True):
                                         st.session_state.custom_builder_selections = {"chart_display_name": REVERSE_CHART_TYPE_MAP.get(display_type)}
                                         st.session_state.preview_data = None
                                         st.session_state.show_builder_dialog = True
+                                        
+                                        st.session_state.task_start_time = time.time()
+                                        st.session_state.pending_recommendation = {
+                                            "rank": i + 1, 
+                                            "view_name": rec_view,
+                                            "recommendation_list": st.session_state.recommendations
+                                        }
                                         st.rerun()
                         
-                        # Add "Create New" card
                         with cols[rec_cols]:
                             with st.container(border=True):
                                 st.markdown("<h3 style='text-align: center;'>➕</h3>", unsafe_allow_html=True)
                                 st.markdown("<p style='text-align: center; font-weight: bold;'>新しいグラフを作成</p>", unsafe_allow_html=True)
+                                
+                                # --- タスク開始ログ ---
                                 if st.button("作成", key="custom_create_new", use_container_width=True):
                                     st.session_state.custom_builder_selections = {"chart_display_name": None}
                                     st.session_state.preview_data = None
                                     st.session_state.show_builder_dialog = True
+                                    
+                                    st.session_state.task_start_time = time.time()
+                                    st.session_state.pending_recommendation = None 
                                     st.rerun()
                     else:
-                        # Display only "Create New" button if no recommendations
                         if st.button("📊 新しいグラフを対話的に作成する"):
                             st.session_state.custom_builder_selections = {"chart_display_name": None}
                             st.session_state.preview_data = None
                             st.session_state.show_builder_dialog = True
+                            
+                            st.session_state.task_start_time = time.time()
+                            st.session_state.pending_recommendation = None 
                             st.rerun()
+
+            # --- 4. ログダウンロード機能 (streamlit-browser-session-storage を使うよう修正) ---
+            st.markdown("---")
+            st.subheader("📊 操作ログ")
+            
+            ss = SessionStorage() # ライブラリのインスタンスを作成
+            
+            # .getItem() はキーワード引数(key=)を取らない
+            current_log = ss.getItem('operation_log')
+            
+            if current_log:
+                # ログをJSON文字列に変換
+                try:
+                    log_data_json = json.dumps(
+                        current_log, # 取得したログを使用
+                        indent=2, 
+                        ensure_ascii=False
+                    )
+                    
+                    st.download_button(
+                        label="操作ログをダウンロード (.json)",
+                        data=log_data_json,
+                        file_name=f"metabase_app_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json",
+                        use_container_width=True
+                    )
+                    
+                    # ログのプレビュー (最新5件)
+                    with st.expander("最新のログを表示 (最新5件)"):
+                        st.json(current_log[-5:]) # 取得したログを使用
+                        
+                except Exception as e:
+                    st.error(f"ログのシリアル化に失敗しました: {e}")
+            else:
+                st.info("まだ操作ログはありません。")
+            # --- ログダウンロード機能ここまで ---
 
 
         if st.session_state.get('show_builder_dialog', False):
@@ -873,4 +1078,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

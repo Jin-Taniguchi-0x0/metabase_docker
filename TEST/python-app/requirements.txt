@@ -7,3 +7,4 @@ seaborn
 PyJWT
 pykeen
 plotly
+streamlit-browser-session-storage

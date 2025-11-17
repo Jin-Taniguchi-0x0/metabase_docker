@@ -53,6 +53,8 @@ services:
       - metabase
     networks:
       - metanet1
+    volumes:
+      - ./python-app:/app
     entrypoint: ["sh", "-c", "while ! nc -z metabase 3000; do sleep 1; done; streamlit run app.py --server.port 8080"]
     ports:
       - 8080:8080
