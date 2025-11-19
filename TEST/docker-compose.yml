@@ -1,5 +1,6 @@
 services:
-  pgsql_db:
+  # 1. Metabaseが内部データを保存するための専用DB
+  metabase_app_db:
     image: postgres:${POSTGRES_VERSION}
     container_name: ${CONTAINER_NAME}
     hostname: ${HOSTNAME}
@@ -13,9 +14,27 @@ services:
     networks:
       - metanet1
     volumes:
-      # - postgres:/var/lib/postgresql/data
-      - ./postgres:/docker-entrypoint-initdb.d 
+      - metabase_postgres_data:/var/lib/postgresql/data
 
+  # 2. wineReview.csv や social_media_ads.csv を格納する分析用DB
+  data_db:
+    image: postgres:${DATA_DB_POSTGRES_VERSION}
+    container_name: ${DATA_DB_CONTAINER_NAME}
+    hostname: ${DATA_DB_HOSTNAME}
+    ports:
+      - "5433:5432"
+    restart: always
+    environment:
+      - POSTGRES_USER=${DATA_DB_USER}
+      - POSTGRES_PASSWORD=${DATA_DB_PASS}
+      - POSTGRES_DB=${DATA_DB_NAME}
+    networks:
+      - metanet1
+    volumes:
+      # init_data_db.sh と csv ファイルが入ったフォルダをマウント
+      - ./data_init:/docker-entrypoint-initdb.d
+
+  # Metabase 本体
   metabase:
     platform: linux/x86_64
     image: metabase/metabase:latest
@@ -29,8 +48,8 @@ services:
       MB_DB_PORT: 5432
       MB_DB_USER: ${USER_NAME}
       MB_DB_PASS: ${USER_PASS}
-      MB_DB_HOST: pgsql_db
-      MB_DB_CONNECTION_URI: postgresql://${USER_NAME}:${USER_PASS}@pgsql_db:5432/${DB_NAME}
+      MB_DB_HOST: ${HOSTNAME}
+      MB_DB_CONNECTION_URI: postgresql://${USER_NAME}:${USER_PASS}@${HOSTNAME}:5432/${DB_NAME}
     networks:
       - metanet1
     healthcheck:
@@ -43,6 +62,7 @@ services:
         limits:
           memory: 6g
 
+  # Python アプリ
   python-app:
     build:
       context: ./python-app
@@ -55,6 +75,13 @@ services:
       - metanet1
     volumes:
       - ./python-app:/app
+    environment:
+      # 【追加】分析用DBへの接続情報を環境変数として渡す
+      - DATA_DB_HOST=${DATA_DB_HOSTNAME}
+      - DATA_DB_NAME=${DATA_DB_NAME}
+      - DATA_DB_USER=${DATA_DB_USER}
+      - DATA_DB_PASS=${DATA_DB_PASS}
+      - DATA_DB_PORT=5432
     entrypoint: ["sh", "-c", "while ! nc -z metabase 3000; do sleep 1; done; streamlit run app.py --server.port 8080"]
     ports:
       - 8080:8080
@@ -65,7 +92,7 @@ services:
       retries: 3
 
 volumes:
-  postgres:
+  metabase_postgres_data:
 
 networks:
   metanet1:
