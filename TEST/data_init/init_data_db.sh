@@ -96,9 +96,9 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
         athlete_id INTEGER,
         Name TEXT,
         Sex TEXT,
-        Age TEXT,
-        Height TEXT,
-        Weight TEXT,
+        Age INTEGER,
+        Height FLOAT,
+        Weight FLOAT,
         Team TEXT,
         NOC TEXT,
         Games TEXT,
@@ -113,7 +113,11 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     INSERT INTO athlete_events (athlete_id, Name, Sex, Age, Height, Weight, Team, NOC, Games, Year, Season, City, Sport, Event, Medal)
     SELECT 
         NULLIF(ID, 'NA')::INTEGER, 
-        Name, Sex, Age, Height, Weight, Team, NOC, Games, 
+        Name, Sex, 
+        NULLIF(Age, 'NA')::INTEGER,
+        NULLIF(Height, 'NA')::FLOAT,
+        NULLIF(Weight, 'NA')::FLOAT,
+        Team, NOC, Games, 
         NULLIF(Year, 'NA')::INTEGER, 
         Season, City, Sport, Event, Medal 
     FROM athlete_events_temp;
@@ -145,17 +149,20 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
         state TEXT,
         country TEXT,
         shape TEXT,
-        duration_seconds TEXT,
+        duration_seconds FLOAT,
         duration_hours_min TEXT,
         comments TEXT,
-        date_posted TEXT,
+        date_posted DATE,
         latitude FLOAT,
         longitude FLOAT
     );
     
     INSERT INTO ufo_scrubbed (datetime, city, state, country, shape, duration_seconds, duration_hours_min, comments, date_posted, latitude, longitude)
     SELECT 
-        datetime, city, state, country, shape, duration_seconds, duration_hours_min, comments, date_posted, 
+        datetime, city, state, country, shape, 
+        NULLIF(duration_seconds, '')::FLOAT,
+        duration_hours_min, comments, 
+        NULLIF(date_posted, '')::DATE, 
         NULLIF(regexp_replace(latitude, '[^0-9.-]', '', 'g'), '')::FLOAT, 
         NULLIF(regexp_replace(longitude, '[^0-9.-]', '', 'g'), '')::FLOAT 
     FROM ufo_scrubbed_temp;
