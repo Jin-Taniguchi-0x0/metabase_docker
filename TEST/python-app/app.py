@@ -52,7 +52,7 @@ CARD_DISPLAY_TYPE_MAPPING = {
     "progress": "visual-progress",
     "sankey": "visual-sankey",
     "object": "visual-object",
-    "number": "visual-scalar"
+    "scalar": "visual-scalar"
 }
 REVERSE_CARD_DISPLAY_TYPE_MAPPING = {v: k for k, v in CARD_DISPLAY_TYPE_MAPPING.items()}
 # KGEモデルの出力(visual-*)との互換性を確保
@@ -71,7 +71,7 @@ REVERSE_CARD_DISPLAY_TYPE_MAPPING.update({
     "visual-rowChart": "row",
     "visual-waterfallChart": "waterfall",
     "visual-comboChart": "combo",
-    "visual-scalar": "number",
+    "visual-scalar": "scalar",
     "visual-progress": "progress",
     "visual-sankey": "sankey",
     "visual-object": "object",
@@ -100,7 +100,7 @@ CHART_TYPE_MAP = {
     "折れ線グラフ": "line",
     "エリアグラフ": "area",
     "円グラフ": "pie",
-    "数値": "number",
+    "数値": "scalar",
     "ゲージ": "gauge",
     "散布図": "scatter",
     "ピボットテーブル": "pivot-table",
@@ -455,9 +455,9 @@ def display_existing_filters(selections: Dict, key_prefix: str = ""):
         if cols[3].button("🗑️", key=f"{key_prefix}del_filter_{i}", help="このフィルターを削除"):
             selections["filters"].pop(i); st.rerun()
 
-def display_add_filter_form(selections: Dict, key_prefix: str = ""):
+def display_add_filter_form(selections: Dict, all_fields: List[Dict] = None, key_prefix: str = ""):
     with st.expander("＋ フィルターを追加する"):
-        all_fields = get_all_available_fields(selections)
+        if all_fields is None: all_fields = get_all_available_fields(selections)
         field_options = {f['display_name_with_table']: f for f in all_fields}
         cols = st.columns(2)
         new_filter_field_display_name = cols[0].selectbox("列", field_options.keys(), index=None, key=f"{key_prefix}new_filter_field")
@@ -519,28 +519,55 @@ def display_join_builder(selections: Dict, key_prefix: str = ""):
                                 "condition": ["=", ["field", base_fields[base_field_name], None], ["field", target_fields[target_field_name], {"join-alias": join_alias}]]}
                     selections["joins"].append(new_join); st.rerun()
 
-def display_aggregation_breakout_form(selections: Dict, show_breakout: bool = True, key_prefix: str = "") -> Tuple[Optional[str], Optional[Any], Optional[Any]]:
-    all_fields = get_all_available_fields(selections)
+def display_aggregation_breakout_form(selections: Dict, all_fields: List[Dict] = None, show_breakout: bool = True, key_prefix: str = "", chart_type: str = None) -> Tuple[Optional[str], Optional[Any], Optional[Any], Optional[str]]:
+    if all_fields is None: all_fields = get_all_available_fields(selections)
     cols = st.columns(2) if show_breakout else [st.container()]
     agg_container, breakout_container = cols[0], (cols[1] if show_breakout else None)
+    
+    # ラベルの決定
+    is_axis_chart = chart_type in ["棒グラフ", "折れ線グラフ", "エリアグラフ"]
+    agg_label = "Y軸 (集計値)" if is_axis_chart else "集約方法"
+    breakout_label = "X軸 (グループ化)" if is_axis_chart else "グループ化する列"
+
     agg_map = {"行のカウント": "count", "..の合計": "sum", "..の平均": "avg", "..の異なる値の数": "distinct", "..の累積合計": "cum-sum", "行の累積カウント": "cum-count", "..の標準偏差": "stddev", "..の最小値": "min", "..の最大値": "max"}
-    agg_type_name = agg_container.selectbox("集約方法", agg_map.keys(), key=f"{key_prefix}agg_type_name")
+    agg_type_name = agg_container.selectbox(agg_label, agg_map.keys(), key=f"{key_prefix}agg_type_name")
     agg_field_ref = None
     field_required_aggs = ["sum", "avg", "distinct", "cum-sum", "stddev", "min", "max"]
     if agg_map[agg_type_name] in field_required_aggs:
         numeric_fields = {f['display_name_with_table']: f['mbql_ref'] for f in all_fields if any(t in f.get('base_type', '').lower() for t in ['integer', 'float', 'double', 'decimal']) and f.get('semantic_type') not in ['type/PK', 'type/FK']}
         agg_field_display_name = agg_container.selectbox("集計対象の列", numeric_fields.keys(), key=f"{key_prefix}agg_field_name", index=None)
         if agg_field_display_name: agg_field_ref = numeric_fields[agg_field_display_name]
+    
     breakout_field_ref = None
+    granularity = None
+    
     if show_breakout and breakout_container:
         field_options = {f['display_name_with_table']: f['mbql_ref'] for f in all_fields}
-        breakout_field_display_name = breakout_container.selectbox("グループ化する列", field_options.keys(), index=None, key=f"{key_prefix}breakout_field_name")
+        breakout_field_display_name = breakout_container.selectbox(breakout_label, field_options.keys(), index=None, key=f"{key_prefix}breakout_field_name")
         breakout_field_ref = field_options.get(breakout_field_display_name)
-    return agg_type_name, agg_field_ref, breakout_field_ref
+        
+        # 日付型のフィールドが選択された場合、粒度を選択できるようにする
+        if breakout_field_display_name:
+            selected_field_info = next((f for f in all_fields if f['display_name_with_table'] == breakout_field_display_name), None)
+            if selected_field_info and any(t in selected_field_info.get('base_type', '').lower() for t in ['date', 'time', 'timestamp']):
+                granularity_map = {
+                    "年": "year",
+                    "四半期": "quarter",
+                    "月": "month",
+                    "週": "week",
+                    "日": "day",
+                    "時間": "hour",
+                    "分": "minute",
+                    "デフォルト": None
+                }
+                granularity_name = breakout_container.selectbox("時間粒度", granularity_map.keys(), index=4, key=f"{key_prefix}granularity") # デフォルトは日
+                granularity = granularity_map.get(granularity_name)
 
-def display_scatter_plot_form(selections: Dict, key_prefix: str = "") -> Tuple[Optional[Dict], Optional[Any]]:
+    return agg_type_name, agg_field_ref, breakout_field_ref, granularity
+
+def display_scatter_plot_form(selections: Dict, all_fields: List[Dict] = None, key_prefix: str = "") -> Tuple[Optional[Dict], Optional[Any]]:
     st.info("散布図は、2つの指標（数値）の関係性を可視化します。オプションでカテゴリによる色分けも可能です。")
-    all_fields = get_all_available_fields(selections)
+    if all_fields is None: all_fields = get_all_available_fields(selections)
     numeric_fields = {
         f['display_name_with_table']: f['mbql_ref'] 
         for f in all_fields 
@@ -559,9 +586,9 @@ def display_scatter_plot_form(selections: Dict, key_prefix: str = "") -> Tuple[O
     breakout_field_ref = field_options.get(breakout_field_display_name)
     return {"y_axis": y_axis_ref, "x_axis": x_axis_ref}, breakout_field_ref
 
-def display_pivot_table_form(selections: Dict, key_prefix: str = ""):
+def display_pivot_table_form(selections: Dict, all_fields: List[Dict] = None, key_prefix: str = ""):
     st.info("ピボットテーブルは、データをクロス集計して表示します。行、列、集計したい値をそれぞれ指定してください。")
-    all_fields = get_all_available_fields(selections)
+    if all_fields is None: all_fields = get_all_available_fields(selections)
     field_options = [f['display_name_with_table'] for f in all_fields]
     numeric_fields = [f['display_name_with_table'] for f in all_fields if any(t in f.get('base_type', '').lower() for t in ['integer', 'float', 'double', 'decimal']) and f.get('semantic_type') not in ['type/PK', 'type/FK']]
     
@@ -580,12 +607,12 @@ def display_pivot_table_form(selections: Dict, key_prefix: str = ""):
     selections['pivot_agg_func_display'] = st.selectbox("集計方法", pivot_agg_options.keys(), key=f"{key_prefix}pivot_agg_selectbox")
     selections['pivot_agg_func'] = pivot_agg_options[selections['pivot_agg_func_display']]
 
-def display_map_form(selections: Dict, key_prefix: str = "") -> Tuple[str, Optional[Dict], Optional[Dict]]:
-    st.info("地図は、地理的なデータを可視化します。「ピンマップ」（緯度経度）または「リージョンマップ」（地域名）を選択してください。")
-    
+def display_map_form(selections: Dict, all_fields: List[Dict], key_prefix: str = "") -> Optional[Dict]:
+    st.info("地図は、地理的なデータを可視化します。ピン（緯度経度）またはリージョン（国、州など）を選択してください。")
+    if all_fields is None: all_fields = get_all_available_fields(selections)
     map_type = st.radio("マップタイプ", ["ピンマップ (緯度・経度)", "リージョンマップ (地域)"], horizontal=True, key=f"{key_prefix}map_type_radio")
     
-    all_fields = get_all_available_fields(selections)
+    # all_fields = get_all_available_fields(selections) # This line is redundant after the change
     field_options = {f['display_name_with_table']: f['mbql_ref'] for f in all_fields}
     numeric_fields = {f['display_name_with_table']: f['mbql_ref'] for f in all_fields if any(t in f.get('base_type', '').lower() for t in ['integer', 'float', 'double', 'decimal']) and f.get('semantic_type') not in ['type/PK', 'type/FK']}
     
@@ -630,44 +657,209 @@ def display_map_form(selections: Dict, key_prefix: str = "") -> Tuple[str, Optio
 
     return map_config
 
-@st.dialog("カスタムグラフ作成")
+@st.dialog("カスタムグラフ作成", width="large")
 def display_custom_chart_form():
     selections = st.session_state.custom_builder_selections
     key_prefix = "custom_"
     chart_type_options = list(CHART_TYPE_MAP.keys())
     current_chart_display_name = selections.get('chart_display_name')
     current_chart_index = chart_type_options.index(current_chart_display_name) if current_chart_display_name in chart_type_options else None
-    def on_chart_type_change():
-        st.session_state.custom_builder_selections['chart_display_name'] = st.session_state[f"{key_prefix}chart_type_selection"]
+    
     chart_display_name = st.selectbox(
-        "1. グラフの種類を選択", 
-        chart_type_options, 
-        key=f"{key_prefix}chart_type_selection", 
+        "グラフの種類を選択", 
+        options=chart_type_options, 
         index=current_chart_index,
-        on_change=on_chart_type_change,
-        placeholder="グラフの種類を選択..."
+        key=f"{key_prefix}chart_type_selection"
     )
+    
+    # 選択されたグラフの種類を保存
+    if chart_display_name:
+        st.session_state.custom_builder_selections['chart_display_name'] = chart_display_name
+
     if selections.get("chart_display_name"):
         # 選択済みテーブル情報を表示
         st.info(f"使用中のテーブル: **{st.session_state.custom_builder_selections.get('table_name')}**")
 
         if selections.get("table_id"):
+            # 共通のフィールドリストを取得（キャッシュ的に利用）
+            all_fields = get_all_available_fields(selections)
+
             # st.markdown("---"); st.markdown("**テーブル結合**"); display_existing_joins(selections, key_prefix=key_prefix); display_join_builder(selections, key_prefix=key_prefix)
-            st.markdown("---"); st.markdown("**フィルター**"); display_existing_filters(selections, key_prefix=key_prefix); display_add_filter_form(selections, key_prefix=key_prefix)
+            st.markdown("---"); st.markdown("**フィルター**"); display_existing_filters(selections, key_prefix=key_prefix); display_add_filter_form(selections, all_fields=all_fields, key_prefix=key_prefix)
             st.markdown("---"); st.markdown("**データ定義**")
             scatter_axes, breakout_field_ref, agg_type_name, agg_field_ref = None, None, None, None
             map_config = None
+            granularity = None
             
             if chart_display_name == "散布図":
-                scatter_axes, breakout_field_ref = display_scatter_plot_form(selections, key_prefix=key_prefix)
+                scatter_axes, breakout_field_ref = display_scatter_plot_form(selections, all_fields=all_fields, key_prefix=key_prefix)
             elif chart_display_name == "ピボットテーブル":
-                display_pivot_table_form(selections, key_prefix=key_prefix)
+                display_pivot_table_form(selections, all_fields=all_fields, key_prefix=key_prefix)
             elif chart_display_name == "地図":
-                map_config = display_map_form(selections, key_prefix=key_prefix)
+                map_config = display_map_form(selections, all_fields=all_fields, key_prefix=key_prefix)
             else:
-                charts_without_breakout = ["数値", "ゲージ"]
+                charts_without_breakout = ["数値", "ゲージ", "scalar"]
                 show_breakout = chart_display_name not in charts_without_breakout
-                agg_type_name, agg_field_ref, breakout_field_ref = display_aggregation_breakout_form(selections, show_breakout=show_breakout, key_prefix=key_prefix)
+                agg_type_name, agg_field_ref, breakout_field_ref, granularity = display_aggregation_breakout_form(selections, all_fields=all_fields, show_breakout=show_breakout, key_prefix=key_prefix, chart_type=chart_display_name)
+                
+                if chart_display_name == "ゲージ":
+                    st.markdown("##### ゲージ設定")
+                    
+                    # Metabase Default Colors
+                    METABASE_COLORS_MAP = {
+                        "Blue": "#509EE3",
+                        "Green": "#9CC177",
+                        "Purple": "#A989C5",
+                        "Red": "#EF8C8C",
+                        "Yellow": "#F9D45C",
+                        "Orange": "#F2A86F",
+                        "Teal": "#98D9D9",
+                        "Indigo": "#7172AD",
+                    }
+                    METABASE_COLOR_NAMES = list(METABASE_COLORS_MAP.keys())
+
+                    # データに基づく最小値・最大値の取得
+                    data_min = 0.0
+                    data_max = 100.0 # デフォルト
+                    
+                    if selections.get('table_id'):
+                        # 集計対象のフィールドを取得
+                        target_field_id = None
+                        if agg_field_ref:
+                             # agg_field_ref is ["field", id, options]
+                             target_field_id = agg_field_ref[1]
+                        
+                        # クエリ構築
+                        stats_query = {
+                            "type": "query",
+                            "database": next((t['db_id'] for t in st.session_state.tables_metadata if t['id'] == selections['table_id']), None),
+                            "query": {
+                                "source-table": selections['table_id'],
+                                "aggregation": []
+                            }
+                        }
+                        
+                        if agg_type_name == "行のカウント":
+                            # Countの場合: Min=0, Max=Count(*)
+                            stats_query["query"]["aggregation"] = [["count"]]
+                            # Countの結果がMaxになる
+                        elif target_field_id:
+                            # フィールド集計の場合: Min=min(field), Max=max(field)
+                            # ただし、Sumの場合は合計値がMaxになるべきだが、ここでは「データの範囲」として
+                            # カラム自体のMin/Maxを取得する（ユーザーの要望「集計対象データの最小値、最大値」）
+                            # もし「売上合計」のゲージなら、0〜売上合計 が適切かもしれないが、
+                            # ここではカラムの統計値を取得する。
+                            stats_query["query"]["aggregation"] = [["min", agg_field_ref], ["max", agg_field_ref]]
+                        
+                        # 実行 (キャッシュなどを考慮しつつ)
+                        # ここでは簡易的に毎回実行（軽量なはず）
+                        try:
+                            with st.spinner("データの統計情報を取得中..."):
+                                stats_result = execute_query(st.session_state.metabase_session_id, stats_query)
+                                if stats_result and stats_result.get('status') == 'completed' and stats_result['data']['rows']:
+                                    row = stats_result['data']['rows'][0]
+                                    if agg_type_name == "行のカウント":
+                                        data_min = 0.0
+                                        data_max = float(row[0])
+                                    else:
+                                        # Min/Max
+                                        if len(row) >= 2:
+                                            data_min = float(row[0]) if row[0] is not None else 0.0
+                                            data_max = float(row[1]) if row[1] is not None else 100.0
+                        except Exception as e:
+                            # エラー時はデフォルト
+                            pass
+
+                    # マージンを持たせる
+                    if data_max == data_min: data_max += 100
+                    
+                    use_segments = st.checkbox("範囲（カラーゾーン）を設定する", value=selections.get('use_segments', False), key=f"{key_prefix}use_segments")
+                    selections['use_segments'] = use_segments
+                    
+                    if use_segments:
+                        num_segments = st.number_input("範囲の数", min_value=1, max_value=8, value=selections.get('num_segments', 1), key=f"{key_prefix}num_segments")
+                        selections['num_segments'] = num_segments
+                        segments = []
+                        
+                        st.caption(f"データの範囲: {data_min} 〜 {data_max}")
+
+                        # コールバック関数の定義 (クロージャとして定義)
+                        def sync_slider_to_inputs(k_slider, k_min, k_max):
+                            val = st.session_state[k_slider]
+                            st.session_state[k_min] = val[0]
+                            st.session_state[k_max] = val[1]
+
+                        def sync_inputs_to_slider(k_slider, k_min, k_max):
+                            # 入力値が逆転しないように制御
+                            mn = st.session_state[k_min]
+                            mx = st.session_state[k_max]
+                            if mn > mx: mn = mx 
+                            st.session_state[k_slider] = (mn, mx)
+
+                        def set_prev_max(i, key_prefix):
+                            prev_max_key = f"{key_prefix}in_max_{i-1}"
+                            curr_min_key = f"{key_prefix}in_min_{i}"
+                            curr_max_key = f"{key_prefix}in_max_{i}"
+                            slider_key = f"{key_prefix}seg_slider_{i}"
+                            
+                            if prev_max_key in st.session_state:
+                                val = st.session_state[prev_max_key]
+                                st.session_state[curr_min_key] = val
+                                # MaxがMinより小さい場合はMaxも更新
+                                if st.session_state[curr_max_key] < val:
+                                     st.session_state[curr_max_key] = val
+                                st.session_state[slider_key] = (st.session_state[curr_min_key], st.session_state[curr_max_key])
+
+                        for i in range(num_segments):
+                            st.markdown(f"**範囲 {i+1}**")
+                            c1, c2 = st.columns([3, 1])
+                            
+                            # 色選択 (Visual)
+                            with c2:
+                                s_color_name = st.selectbox(f"色", METABASE_COLOR_NAMES, index=i % len(METABASE_COLOR_NAMES), key=f"{key_prefix}seg_color_name_{i}", label_visibility="collapsed")
+                                s_color_hex = METABASE_COLORS_MAP[s_color_name]
+                                st.color_picker("", value=s_color_hex, key=f"{key_prefix}seg_color_disp_{i}", disabled=True, label_visibility="collapsed")
+
+                            with c1:
+                                s_label = st.text_input(f"ラベル", value=f"範囲 {i+1}", key=f"{key_prefix}seg_label_{i}")
+                                
+                                # Session State Keys
+                                k_min = f"{key_prefix}in_min_{i}"
+                                k_max = f"{key_prefix}in_max_{i}"
+                                k_slider = f"{key_prefix}seg_slider_{i}"
+                                
+                                # 初期値設定
+                                if k_min not in st.session_state: st.session_state[k_min] = data_min
+                                if k_max not in st.session_state: st.session_state[k_max] = data_max
+                                if k_slider not in st.session_state: st.session_state[k_slider] = (data_min, data_max)
+
+                                # 入力欄
+                                sc1, sc2, sc3 = st.columns([2, 2, 1])
+                                val_min = sc1.number_input("最小", key=k_min, on_change=sync_inputs_to_slider, args=(k_slider, k_min, k_max))
+                                val_max = sc2.number_input("最大", key=k_max, on_change=sync_inputs_to_slider, args=(k_slider, k_min, k_max))
+                                
+                                # 自動入力ボタン (2つ目以降)
+                                if i > 0:
+                                    sc3.button("直前の最大値を適用", key=f"{key_prefix}btn_auto_{i}", on_click=set_prev_max, args=(i, key_prefix))
+                                
+                                # スライダー
+                                # 範囲はデータのMin/Maxより少し広く取る
+                                slider_bound_min = min(data_min, val_min)
+                                slider_bound_max = max(data_max, val_max)
+                                if slider_bound_max == slider_bound_min: slider_bound_max += 100 # マージン
+
+                                s_range = st.slider(
+                                    "範囲",
+                                    min_value=float(slider_bound_min),
+                                    max_value=float(slider_bound_max),
+                                    key=k_slider,
+                                    on_change=sync_slider_to_inputs,
+                                    args=(k_slider, k_min, k_max)
+                                )
+                                s_min, s_max = s_range
+                            
+                            segments.append({"min": s_min, "max": s_max, "label": s_label, "color": s_color_hex})
+                        selections['gauge_segments'] = segments
             st.markdown("---")
             st.selectbox('カードサイズを選択', list(SIZE_MAPPING.keys()), key=f'{key_prefix}card_size_selection')
             col1, col2 = st.columns(2)
@@ -715,7 +907,19 @@ def display_custom_chart_form():
                     
                     aggregation = [agg_type, agg_field_ref] if agg_field_ref else [agg_type]
                     query["aggregation"] = [aggregation]
-                    query["breakout"] = [breakout_field_ref]
+                    
+                    # 粒度がある場合は適用
+                    final_breakout = breakout_field_ref
+                    if granularity:
+                        # breakout_field_ref は ["field", id, options] または ["field", id, None]
+                        # optionsにtemporal-unitを追加する
+                        field_id = breakout_field_ref[1]
+                        options = breakout_field_ref[2] if len(breakout_field_ref) > 2 else None
+                        if options is None: options = {}
+                        options["temporal-unit"] = granularity
+                        final_breakout = ["field", field_id, options]
+
+                    query["breakout"] = [final_breakout]
                     
                     selections["aggregation"] = [aggregation]
                     selections["breakout_id"] = breakout_field_ref[1]
@@ -770,8 +974,28 @@ def display_custom_chart_form():
                             query["aggregation"] = [[agg_type, agg_field_ref]]
                         else: query["aggregation"] = [[agg_type]]
                 
-                if breakout_field_ref and chart_display_name not in ["散布図", "ピボットテーブル", "地図"]: 
-                    query["breakout"] = [breakout_field_ref]
+                if breakout_field_ref and chart_display_name not in ["散布図", "ピボットテーブル", "地図", "ウォーターフォール"]: 
+                    # 粒度がある場合は適用
+                    final_breakout = breakout_field_ref
+                    if granularity:
+                        # breakout_field_ref は ["field", id, options] または ["field", id, None]
+                        # optionsにtemporal-unitを追加する
+                        field_id = breakout_field_ref[1]
+                        options = breakout_field_ref[2] if len(breakout_field_ref) > 2 else None
+                        if options is None: options = {}
+                        options["temporal-unit"] = granularity
+                        final_breakout = ["field", field_id, options]
+                    
+                    
+                    query["breakout"] = [final_breakout]
+
+                if chart_display_name == "ファンネル":
+                    # ファンネルチャートは降順でソートする
+                    query["order-by"] = [["desc", ["aggregation", 0]]]
+
+                if chart_display_name == "ファンネル":
+                    # ファンネルチャートは降順でソートする
+                    query["order-by"] = [["desc", ["aggregation", 0]]]
 
                 dataset_query = {"type": "query", "database": selected_table['db_id'], "query": query}
                 with st.spinner("プレビューデータを取得中..."):
@@ -781,6 +1005,9 @@ def display_custom_chart_form():
                     display_names = [c['display_name'] for c in result_cols]
                     internal_names = [c['name'] for c in result_cols]
                     unique_display_names = _deduplicate_columns(display_names)
+                    # Altair/Streamlit fails if column names contain colons (interpreted as type encoding)
+                    # Sanitize column names by replacing colons with underscores
+                    unique_display_names = [col.replace(':', '_') for col in unique_display_names]
                     df = pd.DataFrame(result['data']['rows'], columns=unique_display_names)
                     
                     if chart_display_name == "ピボットテーブル":
@@ -794,10 +1021,17 @@ def display_custom_chart_form():
                     card_name = ""
                     
                     if chart_display_name == "散布図":
-                        if len(internal_names) >= 2: viz_settings = {"graph.dimensions": [internal_names[0]], "graph.metrics": [internal_names[1]]}
                         x_field = next((f for f in all_fields if f['mbql_ref'] == scatter_axes["x_axis"]), None)
                         y_field = next((f for f in all_fields if f['mbql_ref'] == scatter_axes["y_axis"]), None)
                         breakout_field = next((f for f in all_fields if f['mbql_ref'] == breakout_field_ref), None) if breakout_field_ref else None
+                        
+                        if len(internal_names) >= 2:
+                            if breakout_field and len(internal_names) >= 3:
+                                # X軸と色分け(Breakout)をdimensionに、Y軸をmetricに設定
+                                viz_settings = {"graph.dimensions": [internal_names[0], internal_names[2]], "graph.metrics": [internal_names[1]]}
+                            else:
+                                viz_settings = {"graph.dimensions": [internal_names[0]], "graph.metrics": [internal_names[1]]}
+
                         if x_field and y_field:
                             x_name, y_name = x_field['display_name'], y_field['display_name']
                             breakout_name = f" ({breakout_field['display_name']}別)" if breakout_field else ""
@@ -848,7 +1082,27 @@ def display_custom_chart_form():
                             region_field_info = next((f for f in all_fields if f['id'] == region_field_id), None)
                             if region_field_info:
                                 viz_settings["map.region_column"] = region_field_info['name']
+                                viz_settings["map.region_column"] = region_field_info['name']
                                 card_name += f" ({region_field_info['display_name']})"
+
+                    elif chart_display_name == "ゲージ":
+                        agg_field = next((f for f in all_fields if f['mbql_ref'] == agg_field_ref), None) if agg_field_ref else None
+                        agg_str = f"の{agg_field['display_name_with_table']}" if agg_field else ""
+                        card_name = f"ゲージ: {agg_type_name}{agg_str}"
+                        
+                        card_name = f"ゲージ: {agg_type_name}{agg_str}"
+                        
+                        # ゲージの最小・最大はセグメント全体から自動算出、またはデフォルト
+                        # ここでは明示的な gauge.min/max は設定せず、セグメントに任せるか、
+                        # セグメントがある場合はその最小・最大を適用する
+                        if selections.get('use_segments'):
+                            segs = selections.get('gauge_segments', [])
+                            viz_settings["gauge.segments"] = segs
+                            if segs:
+                                all_mins = [s['min'] for s in segs]
+                                all_maxs = [s['max'] for s in segs]
+                                viz_settings["gauge.min"] = min(all_mins) if all_mins else 0
+                                viz_settings["gauge.max"] = max(all_maxs) if all_maxs else 100
 
                     else:
                         agg_field = next((f for f in all_fields if f['mbql_ref'] == agg_field_ref), None) if agg_field_ref else None
@@ -1047,6 +1301,17 @@ def embed_dashboard():
 
 def main():
     st.set_page_config(layout="wide"); st.title("ダッシュボードビュー推薦システム (RotatE版)")
+    # ダイアログの「☓」ボタンを非表示にするCSS（グローバルに適用）
+    st.markdown("""
+        <style>
+        div[data-testid="stDialog"] button[aria-label="Close"] {
+            display: none !important;
+        }
+        div[data-testid="stModal"] button[aria-label="Close"] {
+            display: none !important;
+        }
+        </style>
+    """, unsafe_allow_html=True)
     if 'metabase_session_id' not in st.session_state: st.session_state.metabase_session_id = None
     if 'dashboard_id' not in st.session_state: st.session_state.dashboard_id = ""
     if 'secret_key' not in st.session_state: st.session_state.secret_key = ""
@@ -1218,18 +1483,33 @@ def main():
                                     icon = CHART_ICONS.get(display_type, "❓")
                                     # 日本語名に変換
                                     japanese_name = REVERSE_CHART_TYPE_MAP.get(display_type, rec_view)
+                                    
+                                    # ランキング表示
+                                    rank_color = "#FFD700" if i == 0 else "#C0C0C0" if i == 1 else "#CD7F32" if i == 2 else "#f0f2f6"
+                                    st.markdown(f"""
+                                        <div style="background-color: {rank_color}; color: black; padding: 2px 8px; border-radius: 4px; text-align: center; font-weight: bold; margin-bottom: 5px;">
+                                            {i+1}位
+                                        </div>
+                                    """, unsafe_allow_html=True)
+                                    
                                     st.markdown(f"<h3 style='text-align: center;'>{icon}</h3>", unsafe_allow_html=True)
                                     st.markdown(f"<p style='text-align: center; font-weight: bold;'>{japanese_name}</p>", unsafe_allow_html=True)
                                     if st.button("作成", key=f"rec_{rec_view}", use_container_width=True):
-                                        # テーブル選択情報を保持しつつ、他の設定をリセット
-                                        current_selections = st.session_state.custom_builder_selections
+                                        # 設定をリセット（テーブル選択もクリア）
+                                        target_chart_type = REVERSE_CHART_TYPE_MAP.get(display_type)
                                         st.session_state.custom_builder_selections = {
-                                            "table_id": current_selections.get("table_id"),
-                                            "table_name": current_selections.get("table_name"),
-                                            "available_fields": current_selections.get("available_fields", []),
-                                            "chart_display_name": REVERSE_CHART_TYPE_MAP.get(display_type),
+                                            "table_id": None,
+                                            "table_name": None,
+                                            "available_fields": [],
+                                            "chart_display_name": target_chart_type,
                                             "joins": [], "filters": [], "aggregation": [], "breakout_id": None, "breakout_name": None
                                         }
+                                        # ウィジェットの状態を強制的に更新（上書き）
+                                        if target_chart_type:
+                                            st.session_state["custom_chart_type_selection"] = target_chart_type
+                                        else:
+                                            st.session_state.pop("custom_chart_type_selection", None)
+                                        
                                         st.session_state.preview_data = None
                                         st.session_state.show_builder_dialog = True
                                         st.session_state.task_start_time = time.time()
@@ -1244,15 +1524,17 @@ def main():
                                 st.markdown("<h3 style='text-align: center;'>➕</h3>", unsafe_allow_html=True)
                                 st.markdown("<p style='text-align: center; font-weight: bold;'>新しいグラフを作成</p>", unsafe_allow_html=True)
                                 if st.button("作成", key="custom_create_new", use_container_width=True):
-                                    # テーブル選択情報を保持しつつ、他の設定をリセット
-                                    current_selections = st.session_state.custom_builder_selections
+                                    # 設定をリセット（テーブル選択もクリア）
                                     st.session_state.custom_builder_selections = {
-                                        "table_id": current_selections.get("table_id"),
-                                        "table_name": current_selections.get("table_name"),
-                                        "available_fields": current_selections.get("available_fields", []),
+                                        "table_id": None,
+                                        "table_name": None,
+                                        "available_fields": [],
                                         "chart_display_name": None,
                                         "joins": [], "filters": [], "aggregation": [], "breakout_id": None, "breakout_name": None
                                     }
+                                    # ウィジェットの状態をクリア
+                                    st.session_state.pop("custom_chart_type_selection", None)
+
                                     st.session_state.preview_data = None
                                     st.session_state.show_builder_dialog = True
                                     st.session_state.task_start_time = time.time()
@@ -1260,15 +1542,17 @@ def main():
                                     st.rerun()
                     else:
                         if st.button("📊 新しいグラフを対話的に作成する"):
-                            # テーブル選択情報を保持しつつ、他の設定をリセット
-                            current_selections = st.session_state.custom_builder_selections
+                            # 設定をリセット（テーブル選択もクリア）
                             st.session_state.custom_builder_selections = {
-                                "table_id": current_selections.get("table_id"),
-                                "table_name": current_selections.get("table_name"),
-                                "available_fields": current_selections.get("available_fields", []),
+                                "table_id": None,
+                                "table_name": None,
+                                "available_fields": [],
                                 "chart_display_name": None,
                                 "joins": [], "filters": [], "aggregation": [], "breakout_id": None, "breakout_name": None
                             }
+                            # ウィジェットの状態をクリア
+                            st.session_state.pop("custom_chart_type_selection", None)
+
                             st.session_state.preview_data = None
                             st.session_state.show_builder_dialog = True
                             st.session_state.task_start_time = time.time()

@@ -144,7 +144,7 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     
     CREATE TABLE ufo_scrubbed (
         id SERIAL PRIMARY KEY,
-        datetime TEXT,
+        datetime TIMESTAMP,
         city TEXT,
         state TEXT,
         country TEXT,
@@ -159,8 +159,12 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     
     INSERT INTO ufo_scrubbed (datetime, city, state, country, shape, duration_seconds, duration_hours_min, comments, date_posted, latitude, longitude)
     SELECT 
-        datetime, city, state, country, shape, 
-        NULLIF(duration_seconds, '')::FLOAT,
+        CASE 
+            WHEN split_part(datetime, ' ', 2) = '24:00' THEN (split_part(datetime, ' ', 1)::date + 1)::timestamp 
+            ELSE datetime::timestamp 
+        END,
+        city, state, country, shape, 
+        NULLIF(regexp_replace(duration_seconds, '[^0-9.-]', '', 'g'), '')::FLOAT,
         duration_hours_min, comments, 
         NULLIF(date_posted, '')::DATE, 
         NULLIF(regexp_replace(latitude, '[^0-9.-]', '', 'g'), '')::FLOAT, 
