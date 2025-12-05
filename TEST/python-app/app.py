@@ -158,13 +158,38 @@ def add_log_entry(action: str, details: Dict):
     log = ss.getItem('operation_log') 
     if log is None:
         log = []
+    
+    # 基本情報の収集
+    timestamp = datetime.now().isoformat()
+    user_id = st.session_state.get("username", "unknown")
+    use_rec = st.session_state.get("use_recommendation", True)
+    dashboard_id = st.session_state.get("dashboard_id", "")
+    
     entry = {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": timestamp,
+        "user_id": user_id,
+        "dashboard_id": dashboard_id,
+        "recommendation_enabled": use_rec,
         "action": action,
         **details
     }
+    
+    # Session Storage (UI表示用)
     log.append(entry)
     ss.setItem('operation_log', log)
+    
+    # Server-side File Logging (分析用)
+    log_dir = "logs"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    log_file = os.path.join(log_dir, "app_log.jsonl")
+    try:
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"Failed to write log to file: {e}")
+
     print(f"LOG: {entry}")
 
 # --- Metabase連携関数 ---
@@ -818,7 +843,7 @@ def display_custom_chart_form():
                             with c2:
                                 s_color_name = st.selectbox(f"色", METABASE_COLOR_NAMES, index=i % len(METABASE_COLOR_NAMES), key=f"{key_prefix}seg_color_name_{i}", label_visibility="collapsed")
                                 s_color_hex = METABASE_COLORS_MAP[s_color_name]
-                                st.color_picker("", value=s_color_hex, key=f"{key_prefix}seg_color_disp_{i}", disabled=True, label_visibility="collapsed")
+                                st.color_picker("色プレビュー", value=s_color_hex, key=f"{key_prefix}seg_color_disp_{i}", disabled=True, label_visibility="collapsed")
 
                             with c1:
                                 s_label = st.text_input(f"ラベル", value=f"範囲 {i+1}", key=f"{key_prefix}seg_label_{i}")
@@ -1235,7 +1260,8 @@ def display_credentials_form():
         if st.form_submit_button("接続"):
             session_id = get_metabase_session(username, password)
             if session_id:
-                st.session_state.update(metabase_session_id=session_id, dashboard_id=dashboard_id, secret_key=secret_key, use_recommendation=use_recommendation)
+                st.session_state.update(metabase_session_id=session_id, dashboard_id=dashboard_id, secret_key=secret_key, use_recommendation=use_recommendation, username=username)
+                add_log_entry("login", {"dashboard_id": dashboard_id})
                 st.rerun()
 
 def display_table_selection_form():
@@ -1377,6 +1403,7 @@ def main():
             st.divider()
             st.header("Debug Info")
             if st.button("ログアウト"):
+                add_log_entry("logout", {})
                 st.session_state.metabase_session_id = None
                 st.session_state.table_selected = False
                 st.rerun()
@@ -1571,7 +1598,9 @@ def main():
                         data=log_data_json,
                         file_name=f"metabase_app_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
                         mime="application/json",
-                        use_container_width=True
+                        use_container_width=True,
+                        on_click=add_log_entry,
+                        args=("finish_dashboard_creation", {})
                     )
                     with st.expander("最新のログを表示 (最新5件)"):
                         st.json(current_log[-5:])

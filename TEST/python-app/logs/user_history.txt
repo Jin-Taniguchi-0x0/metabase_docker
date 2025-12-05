@@ -1,0 +1,21 @@
+=== Session: tilmit9831@gmail.com_0 (User: tilmit9831@gmail.com) ===
+Start: 2025-11-30 10:17:34.241286, End: 2025-11-30 10:23:17.509504
+Recommendation Enabled: True
+Events:
+  [2025-11-30T10:17:34.241286] select_table: {'dashboard_id': '3', 'table_name': 'Athlete Events', 'table_id': 10}
+  [2025-11-30T10:17:52.232665] select_table: {'dashboard_id': '3', 'table_name': 'Ufo Scrubbed', 'table_id': 11}
+  [2025-11-30T10:17:55.999582] select_table: {'dashboard_id': '3', 'table_name': 'Ufo Scrubbed', 'table_id': 11}
+  [2025-11-30T10:18:19.785181] create_view: {'dashboard_id': '3', 'card_name': 'ピンマップ: Latitude / Longitude', 'card_type': 'map', 'task_duration_sec': 21.89858627319336, 'recommendation_source': 'custom'}
+  [2025-11-30T10:18:21.967730] generate_recommendations: {'dashboard_id': '3', 'current_views': ['visual-map'], 'recommendations': ['visual-funnel', 'visual-lineChart', 'visual-donutChart', 'visual-areaChart', 'visual-gauge'], 'task_duration_sec': 0.0042591094970703125}
+  [2025-11-30T10:19:13.488614] select_table: {'dashboard_id': '3', 'table_name': 'Ufo Scrubbed', 'table_id': 11}
+  [2025-11-30T10:19:27.524059] select_table: {'dashboard_id': '3', 'table_name': 'Ufo Scrubbed', 'table_id': 11}
+  [2025-11-30T10:19:43.900002] create_view: {'dashboard_id': '3', 'card_name': '円グラフ: Ufo Scrubbed -> Country別 行のカウント', 'card_type': 'pie', 'task_duration_sec': 14.008778810501099, 'recommendation_source': 'recommendation', 'rank': 3, 'view_name': 'visual-donutChart', 'recommendation_list': ['visual-funnel', 'visual-lineChart', 'visual-donutChart', 'visual-areaChart', 'visual-gauge']}
+  [2025-11-30T10:19:46.058684] generate_recommendations: {'dashboard_id': '3', 'current_views': ['visual-pieChart', 'visual-map'], 'recommendations': ['visual-donutChart', 'visual-lineChart', 'visual-funnel', 'visual-areaChart', 'visual-pivotTable'], 'task_duration_sec': 0.0018146038055419922}
+  [2025-11-30T10:21:12.693092] create_view: {'dashboard_id': '3', 'card_name': '円グラフ: Ufo Scrubbed -> City別 行のカウント', 'card_type': 'pie', 'task_duration_sec': 38.03936290740967, 'recommendation_source': 'recommendation', 'rank': 1, 'view_name': 'visual-donutChart', 'recommendation_list': ['visual-donutChart', 'visual-lineChart', 'visual-funnel', 'visual-areaChart', 'visual-pivotTable']}
+  [2025-11-30T10:21:14.889527] generate_recommendations: {'dashboard_id': '3', 'current_views': ['visual-pieChart', 'visual-map'], 'recommendations': ['visual-donutChart', 'visual-lineChart', 'visual-funnel', 'visual-areaChart', 'visual-pivotTable'], 'task_duration_sec': 0.002215147018432617}
+  [2025-11-30T10:21:43.585174] select_table: {'dashboard_id': '3', 'table_name': 'Ufo Scrubbed', 'table_id': 11}
+  [2025-11-30T10:22:17.750042] create_view: {'dashboard_id': '3', 'card_name': '棒グラフ: Ufo Scrubbed -> State別 行のカウント', 'card_type': 'bar', 'task_duration_sec': 31.118370056152344, 'recommendation_source': 'custom'}
+  [2025-11-30T10:22:19.950577] generate_recommendations: {'dashboard_id': '3', 'current_views': ['visual-pieChart', 'visual-barChart', 'visual-map'], 'recommendations': ['visual-donutChart', 'visual-pivotTable', 'visual-lineChart', 'visual-areaChart', 'visual-gauge'], 'task_duration_sec': 0.0015442371368408203}
+  [2025-11-30T10:23:15.268413] create_view: {'dashboard_id': '3', 'card_name': 'ゲージ: ..の平均のUfo Scrubbed -> Duration Seconds', 'card_type': 'gauge', 'task_duration_sec': 42.556191205978394, 'recommendation_source': 'recommendation', 'rank': 5, 'view_name': 'visual-gauge', 'recommendation_list': ['visual-donutChart', 'visual-pivotTable', 'visual-lineChart', 'visual-areaChart', 'visual-gauge']}
+  [2025-11-30T10:23:17.509504] generate_recommendations: {'dashboard_id': '3', 'current_views': ['visual-pieChart', 'visual-barChart', 'visual-gauge', 'visual-map'], 'recommendations': ['visual-donutChart', 'visual-pivotTable', 'visual-areaChart', 'visual-lineChart', 'visual-scatterChart'], 'task_duration_sec': 0.001934051513671875}
+
