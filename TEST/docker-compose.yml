@@ -82,7 +82,7 @@ services:
       - DATA_DB_USER=${DATA_DB_USER}
       - DATA_DB_PASS=${DATA_DB_PASS}
       - DATA_DB_PORT=5432
-    entrypoint: ["sh", "-c", "while ! nc -z metabase 3000; do sleep 1; done; streamlit run app.py --server.port 8080"]
+    entrypoint: [ "sh", "start_app.sh" ]
     ports:
       - 8080:8080
     healthcheck:
@@ -93,6 +93,7 @@ services:
 
 volumes:
   metabase_postgres_data:
+
 
 networks:
   metanet1:

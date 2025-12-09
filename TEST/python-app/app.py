@@ -473,12 +473,36 @@ def handle_custom_chart_submission(payload: Dict[str, Any], size_key: str):
             st.rerun()
 
 def display_existing_filters(selections: Dict, key_prefix: str = ""):
-    for i, f in enumerate(selections["filters"]):
+    # フィルターリストのコピーを作成してイテレート（削除操作などで安全のため）
+    filters = selections["filters"]
+    
+    for i, f in enumerate(filters):
+        # 1. フィルター情報の表示
         value_str = f"`{f['value1']}`" + (f" と `{f['value2']}`" if f.get('value2') is not None else "")
         cols = st.columns([4, 3, 3, 1])
-        cols[0].info(f"`{f['field_name']}`"); cols[1].info(f"{f['operator_name']}"); cols[2].info(value_str)
+        cols[0].info(f"`{f['field_name']}`")
+        cols[1].info(f"{f['operator_name']}")
+        cols[2].info(value_str)
+        
         if cols[3].button("🗑️", key=f"{key_prefix}del_filter_{i}", help="このフィルターを削除"):
-            selections["filters"].pop(i); st.rerun()
+            selections["filters"].pop(i)
+            st.rerun()
+
+        # 2. 次の条件との結合（最後の要素以外）
+        if i < len(filters) - 1:
+            # 次のフィルターの logical_operator を操作する
+            next_f = filters[i+1]
+            current_logic = next_f.get("logical_operator", "and")
+            
+            logic_key = f"{key_prefix}filter_logic_next_{i}"
+            selected_logic = st.radio(
+                f"↓ 次の条件との結合", 
+                ["AND", "OR"], 
+                index=0 if current_logic == "and" else 1, 
+                key=logic_key,
+                horizontal=True
+            )
+            next_f["logical_operator"] = selected_logic.lower()
 
 def display_add_filter_form(selections: Dict, all_fields: List[Dict] = None, key_prefix: str = ""):
     with st.expander("＋ フィルターを追加する"):
@@ -496,14 +520,24 @@ def display_add_filter_form(selections: Dict, all_fields: List[Dict] = None, key
                 new_filter_value2 = val_cols[1].text_input("終了値", key=f"{key_prefix}new_filter_value2")
             else:
                 new_filter_value1 = st.text_input("値", key=f"{key_prefix}new_filter_value1")
+        
+        # 既にフィルターがある場合、結合条件を選択させる
+        new_filter_logic = "and"
+        if selections["filters"]:
+            logic_label = st.radio("前の条件との結合", ["AND (すべてに一致)", "OR (いずれかに一致)"], key=f"{key_prefix}new_filter_logic", horizontal=True)
+            new_filter_logic = "and" if "AND" in logic_label else "or"
+
         if st.button("フィルターを追加", key=f"{key_prefix}add_filter_button"):
             if new_filter_field_display_name and new_filter_op_name:
                 selected_field = field_options[new_filter_field_display_name]
-                selections["filters"].append({
+                new_filter = {
                     "field_ref": selected_field['mbql_ref'], "field_name": selected_field['display_name_with_table'], 
                     "operator": operator_map[new_filter_op_name], "operator_name": new_filter_op_name, 
-                    "value1": new_filter_value1, "value2": new_filter_value2
-                }); st.rerun()
+                    "value1": new_filter_value1, "value2": new_filter_value2,
+                    "logical_operator": new_filter_logic
+                }
+                selections["filters"].append(new_filter)
+                st.rerun()
 
 def display_existing_joins(selections: Dict, key_prefix: str = ""):
     for i, join in enumerate(selections["joins"]):
@@ -908,8 +942,22 @@ def display_custom_chart_form():
                             except (ValueError, TypeError): value = f["value1"]
                             clause = [op, field_clause, value]
                         filter_clauses.append(clause)
-                    if len(filter_clauses) > 1: query["filter"] = ["and"] + filter_clauses
-                    elif filter_clauses: query["filter"] = filter_clauses[0]
+                    
+                    if filter_clauses:
+                        # 逐次的にクエリを構築 (Left-to-Right)
+                        # 初期値は最初のフィルター
+                        current_filter_query = filter_clauses[0]
+                        
+                        # 2つ目以降を順次結合
+                        for i in range(1, len(filter_clauses)):
+                            # 対応するフィルター定義から結合条件を取得
+                            # filter_clauses[i] は selections["filters"][i] に対応
+                            logic = selections["filters"][i].get("logical_operator", "and")
+                            next_clause = filter_clauses[i]
+                            
+                            current_filter_query = [logic, current_filter_query, next_clause]
+                        
+                        query["filter"] = current_filter_query
                 
                 agg_map = {"行のカウント": "count", "..の合計": "sum", "..の平均": "avg", "..の異なる値の数": "distinct", "..の累積合計": "cum-sum", "行の累積カウント": "cum-count", "..の標準偏差": "stddev", "..の最小値": "min", "..の最大値": "max"}
                 agg_type = agg_map.get(agg_type_name) if agg_type_name else None
@@ -1138,6 +1186,21 @@ def display_custom_chart_form():
                         else:
                             card_name = f"{chart_display_name}: {agg_type_name}{agg_str}"
                     
+                    if selections["filters"]:
+                        filter_summary = ""
+                        for i, f in enumerate(selections["filters"]):
+                            val_str = f"{f['value1']}" + (f" ~ {f['value2']}" if f.get('value2') else "")
+                            op_name = f['operator_name']
+                            current_str = f"{f['field_name']} {op_name} {val_str}"
+                            
+                            if i == 0:
+                                filter_summary += current_str
+                            else:
+                                logic = f.get("logical_operator", "and").upper()
+                                filter_summary += f" {logic} {current_str}"
+                        
+                        card_name += f" ({filter_summary})"
+
                     final_payload = {
                         "name": card_name,
                         "display": CHART_TYPE_MAP.get(chart_display_name),
@@ -1249,6 +1312,11 @@ def display_custom_chart_form():
             st.info("クエリは成功しましたが、結果は0件でした。")
         st.markdown("---")
         if st.button("作成してダッシュボードに追加", type="primary", key=f"{key_prefix}add_to_dashboard_button"):
+            add_log_entry("click_create_view", {
+                "dashboard_id": st.session_state.dashboard_id,
+                "chart_type": selections.get('chart_display_name'),
+                "table_name": selections.get('table_name')
+            })
             handle_custom_chart_submission(st.session_state.preview_data['final_payload'], size_key=f"{key_prefix}card_size_selection")
 
 def display_credentials_form():

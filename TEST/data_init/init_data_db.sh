@@ -60,11 +60,12 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
         region_1 TEXT,
         region_2 TEXT,
         variety TEXT,
-        winery TEXT
+        winery TEXT,
+        points_per_price FLOAT
     );
     
-    INSERT INTO wine_review (id, country, description, designation, points, price, province, region_1, region_2, variety, winery)
-    SELECT csv_id, country, description, designation, points, price, province, region_1, region_2, variety, winery FROM wine_review_temp;
+    INSERT INTO wine_review (id, country, description, designation, points, price, province, region_1, region_2, variety, winery, points_per_price)
+    SELECT csv_id, country, description, designation, points, price, province, region_1, region_2, variety, winery, ROUND(points::numeric / NULLIF(price::numeric, 0), 2) FROM wine_review_temp;
 EOSQL
 
 # === 3. athlete_events テーブル ===

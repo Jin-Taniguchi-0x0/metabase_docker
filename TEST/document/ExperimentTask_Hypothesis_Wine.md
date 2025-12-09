@@ -8,32 +8,33 @@
 あなたのミッションは、**インタラクティブなダッシュボードを作成し、コストパフォーマンスの高いワイン産地や品種を発掘すること**です。
 
 ### **📊 データセット詳細: wineReview.csv**
+
 **概要:** 129971 行, 14 カラム
 
-| カラム名 | データ型 | 統計量・詳細 |
-| :--- | :--- | :--- |
-| csv_id | int64 | 最小: 0<br>最大: 129970<br>平均: 64985.00 |
-| country | object | ユニーク数: 43<br>上位3件:<br>US (54504件)<br>France (22093件)<br>Italy (19540件) |
-| description | object | ユニーク数: 119955<br>上位3件:<br>Cigar box, café au lait, and dried tobacco aromas are followed by coffee and blackberry flavors on the palate with a moderate finish. (3件)<br>Seductively tart in lemon pith, cranberry and pomegranate, this refreshing, light-bodied quaff is infinitely drool-worthy. (3件)<br>This communicates a sense of aromatic purity, with scents of white flower, stone fruit and citrus. The mouthfeel is creamy and rich, but supported by good acidity. (3件) |
-| designation | object | ユニーク数: 37979<br>上位3件:<br>Reserve (2009件)<br>Estate (1322件)<br>Riserva (698件) |
-| points | int64 | 最小: 80<br>最大: 100<br>平均: 88.45 |
-| price | float64 | 最小: 4.0<br>最大: 3300.0<br>平均: 35.36 |
-| province | object | ユニーク数: 425<br>上位3件:<br>California (36247件)<br>Washington (8639件)<br>Bordeaux (5941件) |
-| region_1 | object | ユニーク数: 1229<br>上位3件:<br>Napa Valley (4480件)<br>Columbia Valley (WA) (4124件)<br>Russian River Valley (3091件) |
-| region_2 | object | ユニーク数: 17<br>上位3件:<br>Central Coast (11065件)<br>Sonoma (9028件)<br>Columbia Valley (8103件) |
-| taster_name | object | ユニーク数: 19<br>上位3件:<br>Roger Voss (25514件)<br>Michael Schachner (15134件)<br>Kerin O’Keefe (10776件) |
-| taster_twitter_handle | object | ユニーク数: 15<br>上位3件:<br>@vossroger (25514件)<br>@wineschach (15134件)<br>@kerinokeefe (10776件) |
-| title | object | ユニーク数: 118840<br>上位3件:<br>Gloria Ferrer NV Sonoma Brut Sparkling (Sonoma County) (11件)<br>Korbel NV Brut Sparkling (California) (9件)<br>Segura Viudas NV Extra Dry Sparkling (Cava) (8件) |
-| variety | object | ユニーク数: 707<br>上位3件:<br>Pinot Noir (13272件)<br>Chardonnay (11753件)<br>Cabernet Sauvignon (9472件) |
-| winery | object | ユニーク数: 16757<br>上位3件:<br>Wines & Winemakers (222件)<br>Testarossa (218件)<br>DFJ Vinhos (215件) |
+| カラム名              | データ型 | 統計量・詳細                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| :-------------------- | :------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| csv_id                | int64    | 最小: 0<br>最大: 129970<br>平均: 64985.00                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| country               | object   | ユニーク数: 43<br>上位 3 件:<br>US (54504 件)<br>France (22093 件)<br>Italy (19540 件)                                                                                                                                                                                                                                                                                                                                                                                                              |
+| description           | object   | ユニーク数: 119955<br>上位 3 件:<br>Cigar box, café au lait, and dried tobacco aromas are followed by coffee and blackberry flavors on the palate with a moderate finish. (3 件)<br>Seductively tart in lemon pith, cranberry and pomegranate, this refreshing, light-bodied quaff is infinitely drool-worthy. (3 件)<br>This communicates a sense of aromatic purity, with scents of white flower, stone fruit and citrus. The mouthfeel is creamy and rich, but supported by good acidity. (3 件) |
+| designation           | object   | ユニーク数: 37979<br>上位 3 件:<br>Reserve (2009 件)<br>Estate (1322 件)<br>Riserva (698 件)                                                                                                                                                                                                                                                                                                                                                                                                        |
+| points                | int64    | 最小: 80<br>最大: 100<br>平均: 88.45                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| price                 | float64  | 最小: 4.0<br>最大: 3300.0<br>平均: 35.36                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| province              | object   | ユニーク数: 425<br>上位 3 件:<br>California (36247 件)<br>Washington (8639 件)<br>Bordeaux (5941 件)                                                                                                                                                                                                                                                                                                                                                                                                |
+| region_1              | object   | ユニーク数: 1229<br>上位 3 件:<br>Napa Valley (4480 件)<br>Columbia Valley (WA) (4124 件)<br>Russian River Valley (3091 件)                                                                                                                                                                                                                                                                                                                                                                         |
+| region_2              | object   | ユニーク数: 17<br>上位 3 件:<br>Central Coast (11065 件)<br>Sonoma (9028 件)<br>Columbia Valley (8103 件)                                                                                                                                                                                                                                                                                                                                                                                           |
+| taster_name           | object   | ユニーク数: 19<br>上位 3 件:<br>Roger Voss (25514 件)<br>Michael Schachner (15134 件)<br>Kerin O’Keefe (10776 件)                                                                                                                                                                                                                                                                                                                                                                                   |
+| taster_twitter_handle | object   | ユニーク数: 15<br>上位 3 件:<br>@vossroger (25514 件)<br>@wineschach (15134 件)<br>@kerinokeefe (10776 件)                                                                                                                                                                                                                                                                                                                                                                                          |
+| title                 | object   | ユニーク数: 118840<br>上位 3 件:<br>Gloria Ferrer NV Sonoma Brut Sparkling (Sonoma County) (11 件)<br>Korbel NV Brut Sparkling (California) (9 件)<br>Segura Viudas NV Extra Dry Sparkling (Cava) (8 件)                                                                                                                                                                                                                                                                                            |
+| variety               | object   | ユニーク数: 707<br>上位 3 件:<br>Pinot Noir (13272 件)<br>Chardonnay (11753 件)<br>Cabernet Sauvignon (9472 件)                                                                                                                                                                                                                                                                                                                                                                                     |
+| winery                | object   | ユニーク数: 16757<br>上位 3 件:<br>Wines & Winemakers (222 件)<br>Testarossa (218 件)<br>DFJ Vinhos (215 件)                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ### **💼 バイヤーの仮説（検証対象）**
 
 バイヤーは以下の仮説を持っていますが、**[ ]** の部分が不明確です。ダッシュボードを作成し、この空白をファクトで埋めてください。
 
-> 「一般的に評価点（Points）が高いワインは価格（Price）も高いが、**[ A ] （国・地域名）** の **[ B ] （品種名）**に関しては、比較的低価格でありながら **[ C ] 点以上**の高評価を獲得しているものが多く、『コスパ最強』のカテゴリーと言えるのではないか。
-> また、著名なレビュワーである **Kerin O’Keefe** 氏の評価傾向についても、何か特徴があるのではないかと気になっている」
-> 
+> 「弊社の基準では、Points が **80~85 点であれば『一般』**、**85~90 であれば『高品質』**、**90 以上であれば『最高品質』** と定義しています。
+> 一般的に評価点（Points）が高いワインは価格（Price）も高い傾向にありますが、**この相関から外れた『コスパ最強』の生産国**が存在するはずです。
+> 具体的には、**[ A ] （国名）** は平均価格が世界平均と比べて **$ [ B ]** も安く、中でも **[ C ] （品種名）** は圧倒的なコストパフォーマンスを誇っていると推測しています。この仮説を検証するためのダッシュボードを作成し、該当する国と詳細を特定してください。」
 
 ### **📃 納品物（作成するダッシュボードの要件）**
 
@@ -41,29 +42,29 @@
 
 **1. 価格と評価点の相関分析**
 
-- **目的:** 価格と評価点の全体的な傾向を把握し、価格が安くても評価が高い領域（左上の領域など）にあるデータの分布を確認する。
-- **ヒント:** 散布図（Scatter Plot）が最も適しています。
+- **目的:** 価格と評価点の全体的な相関を確認し、全体の傾向を把握します。
+- **ヒント:** 価格を横軸、評価点を縦軸にとり、個々のデータの分布を可視化できるグラフを作成してください。
 
-**2. 国・地域別のコスパ分析（[ A ], [ B ], [ C ] の特定）**
+**2. 国別の平均価格比較**
 
-- **目的:** 国や地域（Province）、品種（Variety）ごとに、平均価格と平均評価点を比較し、コストパフォーマンスが良いエリアを特定する。
+- **目的:** 他の国と比較して、平均価格が低い「候補国」をいくつか特定します。
+- **ヒント:** 国（Country）ごとの平均価格を比較できるグラフを作成してください。価格が安い順に並べ替えると発見しやすくなります。
 
-**3. 品種別の評価分布**
+**3. 候補国の品質検証**
 
-- **目的:** 特定の品種（Variety）が、高評価帯にどれくらい分布しているかを確認する。
+- **目的:** 上記で特定した「低価格な国」の平均評価点が、バイヤーの求める「高品質（85 点〜90 点）」のレンジに収まっているかを確認し、最終的に国 [ A ] を特定します。
+- **ヒント:** 特定した国の平均評価点を表示し、その数値が目標レンジ（85〜90）のどこに位置するかを直感的に把握できるグラフを作成してください。
 
-**4. 追加分析：特定レビュワー「Kerin O’Keefe」の深掘り**
+**4. 【自由課題】国 [ A ] を担当するレビュワーの分析**
 
-- **目的:** `taster_name` が "Kerin O’Keefe" のデータに着目し、新たなインサイトを発見する。
-- **分析のヒント:**
-    - 彼女のレビューはどの国に集中しているか？
-    - **価格が $60 を超えるワイン** に限定したとき、彼女の評価点（Points）は他のレビュワーと比べてどう違うか？（厳しい？甘い？分散が大きい？）
-    - 彼女が高評価をつけるワインにはどのような特徴があるか？
+- **目的:** 国 [ A ] のワインを主に評価しているレビュワーは誰か特定し、その人物の評価傾向（他の国と比べて点数が甘いか厳しいか？ どのような価格帯を好むか？）を深掘りしてください。
+- **ヒント:** `taster_name` ごとのレコード数をカウントして主要なレビュワーを特定し、そのレビュワーに絞って分析を行います。
 
 ### **🚀 実行手順**
 
 1. 分析アプリケーションにログインし、データソース `wine_review` に接続します。
-2. **まず最初に「散布図」を作成**し、横軸に価格、縦軸に評価点をとり、全体の相関を確認します。（これは必須のステップです）
-3. 続けて、上記の「3つの分析視点」に対応する他のグラフをそれぞれ作成し、ダッシュボードに配置します。
-4. 完成したダッシュボードを分析し、仮説の **[ A ], [ B ], [ C ]** に当てはまる具体的なファクトを特定してください。
-5. バイヤーへの提案として、Kerin O’Keefe 氏の評価傾向を踏まえた「間違いない一本」と、コスパ重視の「隠れた名品」をそれぞれピックアップしてください。
+2. **Step 1:** 価格と評価点で散布図を作成し、全体の分布を確認します。
+3. **Step 2:** 国ごとの平均価格を比較できるグラフを作成し、コストパフォーマンスが良さそうな（平均価格が低い）国の候補を見つけます。
+4. **Step 3:** 候補国の平均評価点が **85 点以上 90 点未満（高品質）** の範囲に入っているかがひと目でわかるグラフを作成します。これにより、条件に合致する国 **[ A ]** を確定させてください。
+5. **Step 4:** **自由課題** として、特定した国 **[ A ]** を評価しているメインレビュワーを探し出し、その人物の評価傾向を分析するグラフを追加してください。
+6. 完成したダッシュボードをもとに、報告内容をまとめてください。
