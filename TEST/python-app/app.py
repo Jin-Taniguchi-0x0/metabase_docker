@@ -12,6 +12,7 @@ import plotly.express as px
 from datetime import datetime
 import json
 from streamlit_session_browser_storage import SessionStorage
+import uuid
 
 import plotly.graph_objects as go
 
@@ -176,7 +177,7 @@ def add_log_entry(action: str, details: Dict):
     
     # Session Storage (UI表示用)
     log.append(entry)
-    ss.setItem('operation_log', log)
+    ss.setItem('operation_log', log, key=f"set_log_{uuid.uuid4()}")
     
     # Server-side File Logging (分析用)
     log_dir = "logs"
@@ -934,12 +935,36 @@ def display_custom_chart_form():
                         op, field_clause = f["operator"], f["field_ref"]
                         if op in ["is-null", "not-null"]: clause = [op, field_clause]
                         elif op == "between":
-                            try: v1, v2 = float(f["value1"]), float(f["value2"])
-                            except (ValueError, TypeError): st.error(f"フィルター「{f['field_name']}」の範囲指定の値が無効です。"); return
+                            # フィールドタイプを確認
+                            is_date_field = False
+                            field_id = field_clause[1] if isinstance(field_clause, list) and len(field_clause) > 1 else None
+                            if field_id:
+                                field_info = next((f for f in all_fields if f['id'] == field_id), None)
+                                if field_info and any(t in field_info.get('base_type', '').lower() for t in ['date', 'time', 'timestamp']):
+                                    is_date_field = True
+                            
+                            v1, v2 = f["value1"], f["value2"]
+                            if not is_date_field:
+                                try: v1 = float(v1)
+                                except (ValueError, TypeError): pass
+                                try: v2 = float(v2)
+                                except (ValueError, TypeError): pass
+                            
                             clause = [op, field_clause, v1, v2]
                         else:
-                            try: value = float(f["value1"])
-                            except (ValueError, TypeError): value = f["value1"]
+                            # フィールドタイプを確認 (共通ロジック)
+                            is_date_field = False
+                            field_id = field_clause[1] if isinstance(field_clause, list) and len(field_clause) > 1 else None
+                            if field_id:
+                                field_info = next((f for f in all_fields if f['id'] == field_id), None)
+                                if field_info and any(t in field_info.get('base_type', '').lower() for t in ['date', 'time', 'timestamp']):
+                                    is_date_field = True
+
+                            value = f["value1"]
+                            if not is_date_field:
+                                try: value = float(value)
+                                except (ValueError, TypeError): pass
+                            
                             clause = [op, field_clause, value]
                         filter_clauses.append(clause)
                     

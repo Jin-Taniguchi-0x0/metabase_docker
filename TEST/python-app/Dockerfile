@@ -9,9 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN apt-get update && apt-get install -y curl && apt-get install sudo
 RUN apt-get install -y netcat-openbsd
 
-# Create a directory for models and copy the model file
-RUN mkdir -p /app/models
-COPY models/KGE_TransE_model.pkl /app/models/KGE_TransE_model.pkl
+
 
 COPY . .
 
