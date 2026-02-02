@@ -77,7 +77,18 @@ def analyze():
             if views_created > 0:
                 rec_usage_rate = round((rec_used / views_created) * 100, 1)
 
+            # Determine Rec Enabled and Task from all events
+            rec_enabled = "Unknown"
+            table_names = set()
+            for e in events:
+                if 'recommendation_enabled' in e:
+                    rec_enabled = e['recommendation_enabled']
+                if 'table_name' in e:
+                    table_names.add(e['table_name'])
+
             print(f"Dashboard {dash_id}:")
+            print(f"  Condition: Rec={rec_enabled}")
+            print(f"  Tables Used: {list(table_names)}")
             print(f"  Duration: {duration_min} min")
             print(f"  Views Created: {views_created} (Custom: {custom_created}, Rec: {rec_used})")
             print(f"  Rec Usage Rate: {rec_usage_rate}%")
